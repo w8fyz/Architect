@@ -1,0 +1,22 @@
+plugins {
+    id 'java'
+}
+
+group = 'fr.freshperf.architect'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation "org.hibernate.orm:hibernate-core:6.3.0.Final"
+    implementation "org.postgresql:postgresql:42.6.0"
+    implementation "com.zaxxer:HikariCP:5.0.1"
+    implementation "org.reflections:reflections:0.10.2"
+    implementation "jakarta.persistence:jakarta.persistence-api:3.1.0"
+}
+
+test {
+    useJUnitPlatform()
+}
