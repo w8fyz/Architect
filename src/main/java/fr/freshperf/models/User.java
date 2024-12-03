@@ -1,10 +1,11 @@
 package fr.freshperf.models;
 
+import fr.freshperf.architect.entities.IdentifiableEntity;
 import jakarta.persistence.*;
 
 @Entity
 @Table(name = "users")
-public class User {
+public class User implements IdentifiableEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

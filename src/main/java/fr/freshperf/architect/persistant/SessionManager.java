@@ -1,4 +1,4 @@
-package fr.freshperf.architect;
+package fr.freshperf.architect.persistant;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.cfg.Configuration;
@@ -12,6 +12,8 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class SessionManager {
     private static SessionManager instance;
@@ -29,6 +31,9 @@ public class SessionManager {
             settings.put(Environment.PASS, password);
             settings.put(Environment.DIALECT, "org.hibernate.dialect.PostgreSQLDialect");
             settings.put(Environment.HBM2DDL_AUTO, "update");
+            settings.put(Environment.SHOW_SQL, "false");
+
+            Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
             // HikariCP settings
             settings.put("hibernate.hikari.minimumIdle", "5");
@@ -85,7 +90,7 @@ public class SessionManager {
         }
         threadPool.shutdown();
         try {
-            if (!threadPool.awaitTermination(20, TimeUnit.SECONDS)) {
+            if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
                 threadPool.shutdownNow();
             }
         } catch (InterruptedException e) {
