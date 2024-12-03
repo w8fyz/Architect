@@ -1,6 +1,6 @@
 package fr.freshperf.architect.repositories;
 
-import fr.freshperf.architect.SessionManager;
+import fr.freshperf.architect.persistant.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
 
@@ -10,8 +10,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 
 public class GenericRepository<T> {
-    private final Class<T> type;
-    private final ExecutorService threadPool;
+    protected final Class<T> type;
+    protected final ExecutorService threadPool;
 
     public GenericRepository(Class<T> type) {
         this.type = type;
