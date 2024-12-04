@@ -1,4 +1,6 @@
 package fr.freshperf.architect.persistant;
+import io.github.classgraph.ClassGraph;
+import io.github.classgraph.ScanResult;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.cfg.Configuration;
@@ -6,7 +8,12 @@ import org.hibernate.cfg.Environment;
 
 import jakarta.persistence.Entity;
 import org.reflections.Reflections;
+import org.reflections.scanners.Scanners;
+import org.reflections.util.ClasspathHelper;
+import org.reflections.util.ConfigurationBuilder;
+import org.reflections.util.FilterBuilder;
 
+import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -21,7 +28,7 @@ public class SessionManager {
     private final ExecutorService threadPool;
 
     // Private constructor for singleton pattern
-    private SessionManager(String hostname, int port, String database, String user, String password, String entityPackage, int poolSize) {
+    private SessionManager(String hostname, int port, String database, String user, String password, int poolSize) {
         try {
             // Set Hibernate properties programmatically
             Properties settings = new Properties();
@@ -44,8 +51,9 @@ public class SessionManager {
             configuration.setProperties(settings);
 
             // Scan and register entity classes dynamically
-            Set<Class<?>> entityClasses = scanEntities(entityPackage);
+            Set<Class<?>> entityClasses = scanEntities();
             for (Class<?> entityClass : entityClasses) {
+                System.out.println("Registering entity class: " + entityClass.getName());
                 configuration.addAnnotatedClass(entityClass);
             }
 
@@ -58,9 +66,9 @@ public class SessionManager {
     }
 
     // Static method to initialize the instance
-    public static void initialize(String hostname, int port, String database, String user, String password, String entityPackage, int poolSize) {
+    public static void initialize(String hostname, int port, String database, String user, String password, int poolSize) {
         if (instance == null) {
-            instance = new SessionManager(hostname, port, database, user, password, entityPackage, poolSize);
+            instance = new SessionManager(hostname, port, database, user, password, poolSize);
         } else {
             throw new IllegalStateException("SessionManager is already initialized!");
         }
@@ -98,9 +106,22 @@ public class SessionManager {
         }
     }
 
-    // Helper method to scan entities
-    private Set<Class<?>> scanEntities(String packageName) {
-        Reflections reflections = new Reflections(packageName);
-        return reflections.getTypesAnnotatedWith(Entity.class);
+    private Set<Class<?>> scanEntities() {
+        Set<Class<?>> entityClasses = new HashSet<>();
+
+        try (ScanResult scanResult = new ClassGraph()
+                .enableAnnotationInfo()
+                .scan()) {
+
+            scanResult.getClassesWithAnnotation(Entity.class.getName()).forEach(classInfo -> {
+                try {
+                    entityClasses.add(Class.forName(classInfo.getName()));
+                } catch (ClassNotFoundException e) {
+                    e.printStackTrace();
+                }
+            });
+        }
+
+        return entityClasses;
     }
 }

@@ -40,3 +40,4 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+src/main/java/fr/freshperf/architect/Main.java
