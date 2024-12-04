@@ -43,7 +43,7 @@ public class Architect {
                 System.out.println("/!\\ This instance will be used as a receiver /!\\");
             }
             SessionManager.initialize(databaseCredentials.getHostname(), databaseCredentials.getPort(), databaseCredentials.getDatabase(),
-                    databaseCredentials.getUser(), databaseCredentials.getPassword(), databaseCredentials.getEntityPackage(), databaseCredentials.getPoolSize());
+                    databaseCredentials.getUser(), databaseCredentials.getPassword(), databaseCredentials.getPoolSize());
         }
     }
 

@@ -15,6 +15,9 @@ dependencies {
     implementation "com.zaxxer:HikariCP:5.0.1"
     implementation "org.reflections:reflections:0.10.2"
     implementation "jakarta.persistence:jakarta.persistence-api:3.1.0"
+    implementation 'redis.clients:jedis:2.8.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
+    implementation 'io.github.classgraph:classgraph:4.8.161'
 }
 
 test {
