@@ -1,8 +1,8 @@
-package fr.freshperf.architect.cache;
+package sh.fyz.architect.cache;
 
-import fr.freshperf.architect.entities.DatabaseAction;
-import fr.freshperf.architect.repositories.GenericCachedRepository;
-import fr.freshperf.architect.repositories.GenericRepository;
+import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.repositories.GenericCachedRepository;
+import sh.fyz.architect.repositories.GenericRepository;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -11,8 +11,8 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import static fr.freshperf.architect.entities.DatabaseAction.Type.DELETE;
-import static fr.freshperf.architect.entities.DatabaseAction.Type.SAVE;
+import static sh.fyz.architect.entities.DatabaseAction.Type.DELETE;
+import static sh.fyz.architect.entities.DatabaseAction.Type.SAVE;
 
 public class RedisQueueActionPool {
 

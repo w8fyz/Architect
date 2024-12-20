@@ -1,4 +1,4 @@
-package fr.freshperf.architect.persistant;
+package sh.fyz.architect.persistant;
 import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
 import org.hibernate.Session;
@@ -7,11 +7,6 @@ import org.hibernate.cfg.Configuration;
 import org.hibernate.cfg.Environment;
 
 import jakarta.persistence.Entity;
-import org.reflections.Reflections;
-import org.reflections.scanners.Scanners;
-import org.reflections.util.ClasspathHelper;
-import org.reflections.util.ConfigurationBuilder;
-import org.reflections.util.FilterBuilder;
 
 import java.util.HashSet;
 import java.util.Properties;

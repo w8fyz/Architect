@@ -1,11 +1,10 @@
-package fr.freshperf.architect.cache;
+package sh.fyz.architect.cache;
 
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import redis.clients.jedis.JedisPoolConfig;
-import redis.clients.jedis.JedisPubSub;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;

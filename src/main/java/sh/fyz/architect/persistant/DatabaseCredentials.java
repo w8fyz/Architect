@@ -1,4 +1,4 @@
-package fr.freshperf.architect.persistant;
+package sh.fyz.architect.persistant;
 
 public class DatabaseCredentials {
 
