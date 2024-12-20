@@ -1,16 +1,12 @@
-package fr.freshperf.architect.repositories;
+package sh.fyz.architect.repositories;
 
-import fr.freshperf.architect.cache.RedisQueueActionPool;
-import fr.freshperf.architect.entities.DatabaseAction;
-import fr.freshperf.architect.entities.IdentifiableEntity;
-import fr.freshperf.architect.cache.RedisManager;
+import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.entities.IdentifiableEntity;
+import sh.fyz.architect.cache.RedisManager;
 
 import java.util.List;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
-
-import static fr.freshperf.architect.entities.DatabaseAction.Type.DELETE;
-import static fr.freshperf.architect.entities.DatabaseAction.Type.SAVE;
 
 public class GenericCachedRepository<T extends IdentifiableEntity> extends GenericRepository<T> {
     private final Class<T> type;
@@ -32,7 +28,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         Long id = entity.getId();
         String key = cacheKeyPrefix + id;
         RedisManager.get().save(key, entity);
-        updateQueue.add(new DatabaseAction<>(entity, SAVE));
+        updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
         return entity;
     }
 
@@ -55,7 +51,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         Long id = entity.getId();
         String key = cacheKeyPrefix + id;
         RedisManager.get().delete(key);
-        updateQueue.add(new DatabaseAction<>(entity, DELETE));
+        updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
     }
 
     public void flushUpdates() {
@@ -63,10 +59,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         while ((action = updateQueue.poll()) != null) {
             T entity = action.getEntity();
             switch (action.getType()) {
-                case SAVE:
+                case DatabaseAction.Type.SAVE:
                     super.save(entity);
                     break;
-                case DELETE:
+                case DatabaseAction.Type.DELETE:
                     super.delete(entity);
                     break;
             }

@@ -1,9 +1,9 @@
-package fr.freshperf.architect.cache;
+package sh.fyz.architect.cache;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import fr.freshperf.architect.entities.DatabaseAction;
-import fr.freshperf.architect.repositories.GenericRepository;
+import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.repositories.GenericRepository;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
 

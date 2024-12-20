@@ -1,4 +1,4 @@
-package fr.freshperf.architect.cache;
+package sh.fyz.architect.cache;
 
 public class RedisCredentials {
 

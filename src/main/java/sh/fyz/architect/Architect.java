@@ -1,9 +1,9 @@
-package fr.freshperf.architect;
+package sh.fyz.architect;
 
-import fr.freshperf.architect.cache.RedisCredentials;
-import fr.freshperf.architect.cache.RedisManager;
-import fr.freshperf.architect.persistant.DatabaseCredentials;
-import fr.freshperf.architect.persistant.SessionManager;
+import sh.fyz.architect.cache.RedisCredentials;
+import sh.fyz.architect.cache.RedisManager;
+import sh.fyz.architect.persistant.DatabaseCredentials;
+import sh.fyz.architect.persistant.SessionManager;
 
 public class Architect {
 

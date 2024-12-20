@@ -1,9 +1,8 @@
-package fr.freshperf.architect.repositories;
+package sh.fyz.architect.repositories;
 
-import fr.freshperf.architect.cache.EntityChannelPubSub;
-import fr.freshperf.architect.cache.RedisManager;
-import fr.freshperf.architect.entities.DatabaseAction;
-import fr.freshperf.architect.entities.IdentifiableEntity;
+import sh.fyz.architect.cache.EntityChannelPubSub;
+import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.entities.IdentifiableEntity;
 
 import java.util.List;
 

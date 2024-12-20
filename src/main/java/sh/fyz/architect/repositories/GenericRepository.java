@@ -1,6 +1,6 @@
-package fr.freshperf.architect.repositories;
+package sh.fyz.architect.repositories;
 
-import fr.freshperf.architect.persistant.SessionManager;
+import sh.fyz.architect.persistant.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
 

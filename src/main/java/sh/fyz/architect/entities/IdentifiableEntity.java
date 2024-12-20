@@ -1,4 +1,4 @@
-package fr.freshperf.architect.entities;
+package sh.fyz.architect.entities;
 
 public interface IdentifiableEntity {
 
