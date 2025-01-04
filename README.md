@@ -128,7 +128,8 @@ public class UserRepository extends GenericRepository<User> {
     public void findByNameAsync(String name, Consumer<User> action) {
         whereAsync("name", name, action, (user) -> {});
     }
-}```
+}
+```
 
 Ici, on utilise un Repository classique, GenericRepository avec en type **User**.
 Le constructeur parent (super) demande la classe du même type, donc **User.class**
@@ -138,7 +139,8 @@ Et on peux maintenant intéragir avec la base de donnée en créant des fonction
 ```java
     public User findByName(String name) {
         return where("name", name);
-    }```
+    }
+```
 qui utilise la fonction parente "where" avec le field name, et qui permet au final d'utiliser :
 
 **userRepository.findByName(nomDeLutilisateur);**
