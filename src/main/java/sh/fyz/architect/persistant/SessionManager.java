@@ -7,6 +7,7 @@ import org.hibernate.cfg.Configuration;
 import org.hibernate.cfg.Environment;
 
 import jakarta.persistence.Entity;
+import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
 import java.util.HashSet;
 import java.util.Properties;
@@ -22,22 +23,19 @@ public class SessionManager {
     private final SessionFactory sessionFactory;
     private final ExecutorService threadPool;
 
-    // Private constructor for singleton pattern
-    private SessionManager(String hostname, int port, String database, String user, String password, int poolSize) {
+    private SessionManager(SQLAuthProvider authProvider, String user, String password, int poolSize) {
         try {
-            // Set Hibernate properties programmatically
             Properties settings = new Properties();
-            settings.put(Environment.DRIVER, "org.postgresql.Driver");
-            settings.put(Environment.URL, "jdbc:postgresql://"+hostname+":"+port+"/"+database);
+            settings.put(Environment.DRIVER, authProvider.getDriver());
+            settings.put(Environment.URL, authProvider.getUrl());
             settings.put(Environment.USER, user);
             settings.put(Environment.PASS, password);
-            settings.put(Environment.DIALECT, "org.hibernate.dialect.PostgreSQLDialect");
+            settings.put(Environment.DIALECT, authProvider.getDialect());
             settings.put(Environment.HBM2DDL_AUTO, "update");
             settings.put(Environment.SHOW_SQL, "false");
 
             Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
-            // HikariCP settings
             settings.put("hibernate.hikari.minimumIdle", "5");
             settings.put("hibernate.hikari.maximumPoolSize", "10");
             settings.put("hibernate.hikari.idleTimeout", "30000");
@@ -45,7 +43,6 @@ public class SessionManager {
             Configuration configuration = new Configuration();
             configuration.setProperties(settings);
 
-            // Scan and register entity classes dynamically
             Set<Class<?>> entityClasses = scanEntities();
             for (Class<?> entityClass : entityClasses) {
                 System.out.println("Registering entity class: " + entityClass.getName());
@@ -60,10 +57,9 @@ public class SessionManager {
         }
     }
 
-    // Static method to initialize the instance
-    public static void initialize(String hostname, int port, String database, String user, String password, int poolSize) {
+    public static void initialize(SQLAuthProvider authProvider, String user, String password, int poolSize) {
         if (instance == null) {
-            instance = new SessionManager(hostname, port, database, user, password, poolSize);
+            instance = new SessionManager(authProvider, user, password, poolSize);
         } else {
             throw new IllegalStateException("SessionManager is already initialized!");
         }
@@ -73,7 +69,6 @@ public class SessionManager {
         return threadPool;
     }
 
-    // Static method to access the instance
     public static SessionManager get() {
         if (instance == null) {
             throw new IllegalStateException("SessionManager is not initialized! Call initialize() first.");
@@ -81,12 +76,10 @@ public class SessionManager {
         return instance;
     }
 
-    // Method to get a session
     public Session getSession() {
         return sessionFactory.openSession();
     }
 
-    // Method to close the SessionFactory
     public void close() {
         if (sessionFactory != null) {
             sessionFactory.close();

@@ -38,11 +38,11 @@ public class Architect {
 
         }
         if(databaseCredentials != null){
-            System.out.println("Connecting to Database at " + databaseCredentials.getHostname() + ":" + databaseCredentials.getPort());
+            System.out.println("Connecting to Database (using "+ databaseCredentials.getSQLAuthProvider().getClass().getSimpleName()+") at " + databaseCredentials.getSQLAuthProvider().getUrl());
             if (isReceiver) {
                 System.out.println("/!\\ This instance will be used as a receiver /!\\");
             }
-            SessionManager.initialize(databaseCredentials.getHostname(), databaseCredentials.getPort(), databaseCredentials.getDatabase(),
+            SessionManager.initialize(databaseCredentials.getSQLAuthProvider(),
                     databaseCredentials.getUser(), databaseCredentials.getPassword(), databaseCredentials.getPoolSize());
         }
     }
@@ -60,7 +60,7 @@ public class Architect {
         }
 
         if(databaseCredentials != null){
-            System.out.println("Disconnecting from Database at " + databaseCredentials.getHostname() + ":" + databaseCredentials.getPort());
+            System.out.println("Disconnecting from Database at " + databaseCredentials.getSQLAuthProvider().getUrl());
             SessionManager.get().close();
         }
     }
