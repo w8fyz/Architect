@@ -1,25 +1,22 @@
 package sh.fyz.architect.persistant;
 
+import sh.fyz.architect.persistant.sql.SQLAuthProvider;
+
 public class DatabaseCredentials {
 
-    String hostname, database, user, password;
-    int port, poolSize;
+    String user, password;
+    int poolSize;
+    SQLAuthProvider sqlAuthProvider;
 
-    public DatabaseCredentials(String hostname, int port, String database, String user, String password, int poolSize) {
-        this.hostname = hostname;
-        this.port = port;
-        this.database = database;
+    public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize) {
         this.user = user;
         this.password = password;
         this.poolSize = poolSize;
+        this.sqlAuthProvider = sqlAuthProvider;
     }
 
-    public String getHostname() {
-        return hostname;
-    }
-
-    public String getDatabase() {
-        return database;
+    public SQLAuthProvider getSQLAuthProvider() {
+        return sqlAuthProvider;
     }
 
     public String getUser() {
@@ -28,11 +25,6 @@ public class DatabaseCredentials {
 
     public String getPassword() {
         return password;
-    }
-
-
-    public int getPort() {
-        return port;
     }
 
     public int getPoolSize() {
