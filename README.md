@@ -1,33 +1,42 @@
-**COMMENT UTILISER ARCHITECT ?**
+# **HOW TO USE ARCHITECT?**
 
-# **Prérequis**
+## **Prerequisites**
 
-Une base de donnée **PostgreSQL** est nécessaire. Et pour l'utilisation du cache bien que ce soit optionnel, il est nécessaire d'utiliser **Redis**
+A **SQL** database is required. Additionally, for caching (optional but recommended), **Redis** is needed.
 
-# **Instance**
-La première étape est de créer une instance d'Architect, pour ça la syntaxe est simple vous avez un builder intégré à la classe :
+You will need to use a **SQLAuthProvider** in the database credentials.
+Choose it accordingly of what your database need, currenctly these drivers are supported :
+
+- **H2Auth** (H2 Database)
+- **MariaDBAuth** (MariaDB Database)
+- **MySQLAuth** (MySQL Database)
+- **PostgreSQLAuth** (PostgreSQL Database)
+- **SQLiteAuth** (SQLite Database)
+
+## **Instance**
+
+The first step is to create an instance of Architect. The syntax is simple, as a builder is integrated into the class:
 
 ```java
-        Architect architect = new Architect();
+Architect architect = new Architect();
 
-        architect.setReceiver(false); // Voir partie "Repositories - GenericRelayRepository"
+architect.setReceiver(false); // See "Repositories - GenericRelayRepository" section
 
-        architect.setDatabaseCredentials(
-                new DatabaseCredentials("hostname",
-                        3306, "database", "root", "password", 10));
+architect.setDatabaseCredentials(new DatabaseCredentials(
+        new MySQLAuth("hostname",3306,"database") ,"username","password", 12));
 
-        architect.setRedisCredentials(new RedisCredentials("localhost",
-                "password", 6379, 2000, 10));
+architect.setRedisCredentials(new RedisCredentials("localhost",
+        "password", 6379, 2000, 10));
 
-        architect.start();
+architect.start();
 ```
 
-Une fois fait, l'instance d'Architect tourne ! Elle est thread-safe et symbolise juste la mise en place des connexions aux différentes DB.
+Once this is done, the Architect instance is up and running! It is thread-safe and essentially sets up connections to the various databases.
 
-# **Entitée**
+# **Entity**
 
-Pour utiliser Architect, vous devez créer des entités, ce sont des **objets java** avec seulement 2 annotations et une implémentation en plus.
-Par exemple, on va créer une entité "User" :
+To use Architect, you need to create entities. These are Java objects with just two annotations and one additional implementation.
+For example, let’s create a "User" entity:
 
 
 ```java
@@ -96,24 +105,24 @@ public class User implements IdentifiableEntity {
 }
 ```
 
-Ici, l'important ce situe dans l'annotation **@Entity**, qui défini cet objet java comme une entité qui doit être utilisable dans la base de donnée.
-**@Table** permet de définir le nom de la table qui sera utilisé dans la base de donnée et l'interface **IdentifiableEntity** est un repère pour l'Id.
+Here, the key part is the **@Entity** annotation, which marks this Java object as an entity usable with the database.
+The **@Table** annotation specifies the table name in the database, and the IdentifiableEntity interface serves as a reference for the ID.
+You also **need** an empty constructor for your entity, like "User();"
 
 # **Repository**
-Une Repository est en gros le manager des opérations que vous pourrez effectuer sur un type d'entitée, chaque Entitée possède un Repository propre.
+A Repository is essentially the manager of operations you can perform on an entity type. Each entity has its own dedicated Repository.
 
-Tout les repositories fonctionne foncièrement de la même manière et sont interchangeable en changeant le type.
+All repositories work in fundamentally the same way and can be swapped by changing their type.
+The following types of repositories are available:
 
-Plusieurs type de Repository sont disponible :
+- GenericRepository - A standard repository that works directly with the database.
+- GenericCachedRepository - A repository that prioritizes Redis for data, falling back to the database if the data isn’t in Redis (and then caching it).
+- GenericRelayRepository - A repository to use only with an Architect instance that doesn’t directly access the database.
 
-1. **GenericRepository** - Le repository classique, il utilise les données de la base de donnée pur.
-2. **GenericCachedRepository** - Un repository qui va utiliser en priorité les données de Redis puis les données de la base de donnée si elles ne sont pas sur Redis (et les rajouter).
-3. **GenericRelayRepository** - Un repository a utiliser uniquement lors de l'utilisation d'une instance d'Architecte qui n'a pas directement accès la base de donnée.
+For example, in a Minecraft server setup, if we have an Architect instance with a database and Redis running on the BungeeCord server, we don’t want all servers connecting to the database simultaneously to avoid connection overload. Instead, on the Spigot server plugin, we use a GenericRelayRepository, which sends database queries via Redis pub/sub.
+This allows database interaction without direct connections!
 
-Par exemple pour un serveur minecraft, si nous avons une instance Architect avec db + redis qui tourne sur notre bungeecord, on ne veux pas que tout les serveurs se connecte à la base de donnée simultanément pour éviter le surplus de connexion, alors sur le plugin du serveur spigot on utilise un GenericRelayRepository, qui envoie les requêtes à la base de donnée à partir de Redis pub/sub.
-On utilise donc la base de donnée sans même y être connecté !
-
-Pour notre système de User, voici un Repository d'exemple :
+Here’s an example Repository for the User system:
 
 ```java
 public class UserRepository extends GenericRepository<User> {
@@ -131,31 +140,32 @@ public class UserRepository extends GenericRepository<User> {
 }
 ```
 
-Ici, on utilise un Repository classique, GenericRepository avec en type **User**.
-Le constructeur parent (super) demande la classe du même type, donc **User.class**
+Here, we use a standard GenericRepository with the type **User**.
+The parent constructor (super) requires the same type class, i.e., **User.class**.
 
-Et on peux maintenant intéragir avec la base de donnée en créant des fonctions utiles, par exemple :
+Now, we can interact with the database by creating useful methods, such as:
 
 ```java
     public User findByName(String name) {
         return where("name", name);
     }
 ```
-qui utilise la fonction parente "where" avec le field name, et qui permet au final d'utiliser :
+This uses the parent where function with the name field, enabling calls like:
 
-**userRepository.findByName(nomDeLutilisateur);**
+**userRepository.findByName(userName);**
 
-Vous pouvez aussi sauvegarder les données avec
+You can also save data using:
 
 **userRepository.save(user);**
 
-Et voila ! Vous avez accès à votre système de base de donnée sans avoir à créer de table, ou d'utilitaire sql particulier, ici tout est géré par les fonctions parents.
+And that’s it! You now have access to your database system without having to create tables or specialized SQL utilities. Everything is managed by the parent functions.
 
-Exemple complet :
+Complete example:
 
 ```java
         Architect architect = new Architect().setReceiver(true)
-                .setDatabaseCredentials(new DatabaseCredentials("host", 5432, "db", "user", "motdepasse", 10))
+                .setDatabaseCredentials(new DatabaseCredentials(
+                        new MySQLAuth("hostname",3306,"database") ,"username","password", 12));
                 .setRedisCredentials(new RedisCredentials("host", "motdepasse", 6379, 1000, 10));
         architect.start();
 
@@ -172,8 +182,7 @@ Exemple complet :
         architect.stop();
 ```
 
-# **Mot de fin et important**
+# **Closing Notes and Important Reminder**
 
-Des mises à jour sont à venir, si vous avez des bugs et questions n'hésitez pas.
-
-# **ATTENTION :** n'oublier pas de fermer vos sessions à la fin du programme en faisant architect.stop() sur votre instance d'architect.
+Updates are on the way. If you encounter bugs or have questions, don’t hesitate to reach out.
+**IMPORTANT: Always close your sessions at the end of the program by calling architect.stop() on your Architect instance.**
