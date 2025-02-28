@@ -1,10 +1,21 @@
 plugins {
     id 'java'
-    id 'com.github.johnrengelman.shadow' version '7.1.2'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 group = 'fr.freshperf.architect'
 version = '1.0-SNAPSHOT'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ['-parameters']
+    options.release = 17
+}
 
 repositories {
     mavenCentral()
@@ -16,10 +27,25 @@ dependencies {
     implementation "org.reflections:reflections:0.10.2"
     implementation "jakarta.persistence:jakarta.persistence-api:3.1.0"
     implementation 'redis.clients:jedis:2.8.0'
+    implementation 'org.apache.commons:commons-pool2:2.4.2'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
     implementation 'io.github.classgraph:classgraph:4.8.161'
 }
 
 test {
     useJUnitPlatform()
+}
+
+shadowJar {
+    relocate 'org.apache.commons.pool2', 'sh.fyz.architect.lib.commons.pool2'
+    relocate 'redis.clients', 'sh.fyz.architect.lib.redis'
+    relocate 'com.fasterxml.jackson', 'sh.fyz.architect.lib.jackson'
+    relocate 'org.reflections', 'sh.fyz.architect.lib.reflections'
+    relocate 'io.github.classgraph', 'sh.fyz.architect.lib.classgraph'
+    
+    manifest {
+        attributes(
+            'Main-Class': 'sh.fyz.architect.Architect'
+        )
+    }
 }
