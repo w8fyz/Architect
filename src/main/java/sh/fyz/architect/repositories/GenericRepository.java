@@ -83,7 +83,7 @@ public class GenericRepository<T> {
         });
     }
 
-    public T where(String where, String param) {
+    public T where(String where, Object param) {
         try (Session session = SessionManager.get().getSession()) {
             String hql = "FROM " + type.getName() + " WHERE " + where + " = :param";
             List<T> entities = session.createQuery(hql, type)
