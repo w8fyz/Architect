@@ -20,37 +20,38 @@ import java.util.logging.Logger;
 
 public class SessionManager {
     private static SessionManager instance;
-    private final SessionFactory sessionFactory;
+    private SessionFactory sessionFactory;
     private final ExecutorService threadPool;
 
     private SessionManager(SQLAuthProvider authProvider, String user, String password, int poolSize) {
         try {
-            Properties settings = new Properties();
-            settings.put(Environment.DRIVER, authProvider.getDriver());
-            settings.put(Environment.URL, authProvider.getUrl());
-            settings.put(Environment.USER, user);
-            settings.put(Environment.PASS, password);
-            settings.put(Environment.DIALECT, authProvider.getDialect());
-            settings.put(Environment.HBM2DDL_AUTO, "update");
-            settings.put(Environment.SHOW_SQL, "false");
+            if(authProvider != null) {
+                Properties settings = new Properties();
+                settings.put(Environment.DRIVER, authProvider.getDriver());
+                settings.put(Environment.URL, authProvider.getUrl());
+                settings.put(Environment.USER, user);
+                settings.put(Environment.PASS, password);
+                settings.put(Environment.DIALECT, authProvider.getDialect());
+                settings.put(Environment.HBM2DDL_AUTO, "update");
+                settings.put(Environment.SHOW_SQL, "false");
 
-            Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
+                Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
-            settings.put("hibernate.hikari.minimumIdle", "5");
-            settings.put("hibernate.hikari.maximumPoolSize", "10");
-            settings.put("hibernate.hikari.idleTimeout", "30000");
+                settings.put("hibernate.hikari.minimumIdle", "5");
+                settings.put("hibernate.hikari.maximumPoolSize", "10");
+                settings.put("hibernate.hikari.idleTimeout", "30000");
 
-            Configuration configuration = new Configuration();
-            configuration.setProperties(settings);
+                Configuration configuration = new Configuration();
+                configuration.setProperties(settings);
 
-            Set<Class<?>> entityClasses = scanEntities();
-            for (Class<?> entityClass : entityClasses) {
-                System.out.println("Registering entity class: " + entityClass.getName());
-                configuration.addAnnotatedClass(entityClass);
+                Set<Class<?>> entityClasses = scanEntities();
+                for (Class<?> entityClass : entityClasses) {
+                    System.out.println("Registering entity class: " + entityClass.getName());
+                    configuration.addAnnotatedClass(entityClass);
+                }
+
+                this.sessionFactory = configuration.buildSessionFactory();
             }
-
-            this.sessionFactory = configuration.buildSessionFactory();
-
             this.threadPool = Executors.newFixedThreadPool(poolSize);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize Hibernate", e);

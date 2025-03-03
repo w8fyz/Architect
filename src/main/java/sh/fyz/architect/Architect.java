@@ -44,6 +44,8 @@ public class Architect {
             }
             SessionManager.initialize(databaseCredentials.getSQLAuthProvider(),
                     databaseCredentials.getUser(), databaseCredentials.getPassword(), databaseCredentials.getPoolSize());
+        } else {
+            SessionManager.initialize(null, null, null, 1);
         }
     }
 
