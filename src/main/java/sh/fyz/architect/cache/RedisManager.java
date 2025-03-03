@@ -1,11 +1,10 @@
 package sh.fyz.architect.cache;
 
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import redis.clients.jedis.JedisPoolConfig;
-
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -81,9 +80,38 @@ public class RedisManager {
         }
     }
 
+    public <T> List<T> findAll(String pattern, Class<T> type) {
+        List<T> results = new ArrayList<>();
+        try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
+            ScanParams scanParams = new ScanParams().match(pattern).count(100);
+            int cursor = 0;
+            do {
+                ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
+                for (String key : scanResult.getResult()) {
+                    T entity = RedisManager.get().find(key, type);
+                    if (entity != null) {
+                        results.add(entity);
+                    }
+                }
+                cursor = scanResult.getCursor();
+            } while (cursor != 0);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return results;
+    }
+
     public void delete(String key) {
         try (Jedis jedis = jedisPool.getResource()) {
             jedis.del(key);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void setTTL(String key, int seconds) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            jedis.expire(key, seconds);
         } catch (Exception e) {
             e.printStackTrace();
         }
