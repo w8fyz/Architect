@@ -31,6 +31,7 @@ public class EntityChannelPubSub<T> {
     }
 
     public void subscribe() {
+        System.out.println("Subscribing to channel: database-action:"+type.getEntity().getClass().getSimpleName());
         RedisManager.get().getPubSubExecutor().submit(() -> {
             try(Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
                 jedis.subscribe(new JedisPubSub() {
@@ -39,6 +40,7 @@ public class EntityChannelPubSub<T> {
                         try {
                             DatabaseAction<T> entity = new ObjectMapper().readValue(message, type.getClass());
                             RedisManager.get().getRedisQueueActionPool().add(entity, hotRepository);
+                            System.out.println("Received message: " + message);
                         } catch (JsonProcessingException e) {
                             throw new RuntimeException(e);
                         }
