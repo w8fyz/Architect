@@ -27,13 +27,19 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public T save(T entity) {
-        if(entity.getId() == null) {
-            entity = super.save(entity);
+        if (entity.getId() == null) {
+            if (RedisManager.get().isReceiver()) {
+                entity = super.save(entity);
+            } else {
+                return null;
+            }
         }
-        String key = cacheKeyPrefix + entity.getId();
-        RedisManager.get().save(key, entity);
-        updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
-        System.out.print("Added action to updateQueue on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
+            String key = cacheKeyPrefix + entity.getId();
+            RedisManager.get().save(key, entity);
+            if(RedisManager.get().isReceiver()) {
+                updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
+                System.out.print("Added action to updateQueue on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
+            }
         return entity;
     }
 
@@ -105,7 +111,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     public void delete(T entity) {
         String key = cacheKeyPrefix + entity.getId();
         RedisManager.get().delete(key);
-        updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+        if (RedisManager.get().isReceiver()) updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
     }
 
     private List<T> getAllFromCache() {
@@ -113,7 +119,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     }
 
     public void flushUpdates() {
-        System.out.println("Flushing updates on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
         DatabaseAction<T> action;
         while ((action = updateQueue.poll()) != null) {
             T entity = action.getEntity();

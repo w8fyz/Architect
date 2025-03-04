@@ -10,7 +10,7 @@ import java.util.concurrent.Executors;
 
 public class RedisManager {
 
-    private final RedisQueueActionPool redisQueueActionPool;
+    private RedisQueueActionPool redisQueueActionPool;
     private static RedisManager instance;
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
@@ -27,9 +27,12 @@ public class RedisManager {
         config.setMinIdle(1);
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
         this.objectMapper = new ObjectMapper();
-        this.redisQueueActionPool = new RedisQueueActionPool(receiver);
         this.isReceiver = receiver;
         if(receiver) jedisPool.getResource().flushAll();
+    }
+
+    private void createRedisPool() {
+        this.redisQueueActionPool = new RedisQueueActionPool(isReceiver);
     }
 
     public boolean isReceiver() {
@@ -52,6 +55,7 @@ public class RedisManager {
     public static void initialize(String host, String password, int port, int timeout, int maxConnections, boolean receiver) {
         if (instance == null) {
             instance = new RedisManager(host, password, port, timeout, maxConnections, receiver);
+            instance.createRedisPool();
         } else {
             throw new IllegalStateException("RedisManager is already initialized!");
         }
@@ -124,6 +128,7 @@ public class RedisManager {
     }
 
     public void shutdown() {
+        redisQueueActionPool.shutdown();
         jedisPool.close();
         isAlive = false;
     }

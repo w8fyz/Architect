@@ -3,6 +3,7 @@ package sh.fyz.architect.entities;
 public class DatabaseAction<T> {
 
     private T entity;
+    private String className;
     private int type;
 
     public DatabaseAction(T entity) {
@@ -16,6 +17,7 @@ public class DatabaseAction<T> {
 
     public DatabaseAction(T entity, int type) {
         this.entity = entity;
+        this.className = entity.getClass().getSimpleName();
         this.type = type;
     }
 
@@ -23,6 +25,9 @@ public class DatabaseAction<T> {
         return entity;
     }
 
+    public String getClassName() {
+        return className;
+    }
     public int getType() {
         return type;
     }

@@ -9,6 +9,7 @@ import org.hibernate.cfg.Environment;
 import jakarta.persistence.Entity;
 import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
@@ -21,6 +22,8 @@ import java.util.logging.Logger;
 public class SessionManager {
     private static SessionManager instance;
     private SessionFactory sessionFactory;
+
+    private HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
     private SessionManager(SQLAuthProvider authProvider, String user, String password, int poolSize) {
@@ -48,6 +51,7 @@ public class SessionManager {
                 for (Class<?> entityClass : entityClasses) {
                     System.out.println("Registering entity class: " + entityClass.getName());
                     configuration.addAnnotatedClass(entityClass);
+                    registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
                 }
 
                 this.sessionFactory = configuration.buildSessionFactory();
@@ -56,6 +60,10 @@ public class SessionManager {
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize Hibernate", e);
         }
+    }
+
+    public Class<?> getEntityClass(String name) {
+        return registeredEntityClasses.get(name);
     }
 
     public static void initialize(SQLAuthProvider authProvider, String user, String password, int poolSize) {

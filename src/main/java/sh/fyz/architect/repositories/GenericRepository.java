@@ -28,7 +28,8 @@ public class GenericRepository<T> {
             transaction.commit();
         } catch (Exception e) {
             transaction.rollback();
-            throw e;
+            e.printStackTrace();
+            return entity;
         } finally {
             session.close();
         }
@@ -42,6 +43,7 @@ public class GenericRepository<T> {
                 T savedEntity = save(entity);
                 callback.accept(savedEntity);
             } catch (Exception e) {
+                e.printStackTrace();
                 errorCallback.accept(e);
             }
         });
@@ -134,7 +136,7 @@ public class GenericRepository<T> {
             transaction.commit();
         } catch (Exception e) {
             transaction.rollback();
-            throw e;
+            e.printStackTrace();
         } finally {
             session.close();
         }
