@@ -20,6 +20,7 @@ public class RedisQueueActionPool {
     private final HashMap<DatabaseAction, GenericRepository> pubSubQueue = new HashMap<>();
 
     public void add(GenericCachedRepository repository) {
+        System.out.println("ADDING REPOSITORY TO RedisQueueActionPool : "+repository.getClass().getSimpleName());
         queue.add(repository);
         repository.all(); // Load all entities from the database
     }
@@ -28,10 +29,21 @@ public class RedisQueueActionPool {
         pubSubQueue.put(action, repository);
     }
 
-    public RedisQueueActionPool() {
+    public RedisQueueActionPool(boolean isReceiver) {
+        if (!isReceiver) return;
+        System.out.println("CREATING NEW RedisQueueActionPool");
         ExecutorService threadPool = Executors.newFixedThreadPool(2);
+
+        /*
+        *   FUTURE ME :
+        *   the updates are not being flushed, the sysout in flushUpdates() don't appear
+        *   Could be Redis not detected as alive?
+        *   MAYBE threadpool is never submited actually... damn
+        * */
+
         threadPool.submit(() -> {
             while (RedisManager.get().isAlive()) {
+                System.out.println("sry4spam : "+queue.size());
                 Iterator<GenericCachedRepository> iterator = queue.iterator();
                 while (iterator.hasNext()) {
                     GenericCachedRepository repository = iterator.next();
@@ -39,7 +51,9 @@ public class RedisQueueActionPool {
                 }
                 try {
                     Thread.sleep(200);
-                } catch (InterruptedException ignored) {}
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
             }
         });
 
@@ -49,6 +63,7 @@ public class RedisQueueActionPool {
                     Iterator<Map.Entry<DatabaseAction, GenericRepository>> iterator = pubSubQueue.entrySet().iterator();
                     while (iterator.hasNext()) {
                         Map.Entry<DatabaseAction, GenericRepository> entry = iterator.next();
+                        System.out.println("Processing action: " + entry.getKey().getType() + " for entity: " + entry.getKey().getEntity());
                         switch (entry.getKey().getType()) {
                             case SAVE:
                                 entry.getValue().save(entry.getKey().getEntity());

@@ -34,7 +34,7 @@ public class Architect {
         System.out.println("Starting Architect!");
         if(redisCredentials != null){
             System.out.println("Connecting to Redis at " + redisCredentials.getHost() + ":" + redisCredentials.getPort());
-            RedisManager.initialize(redisCredentials.getHost(), redisCredentials.getPassword(), redisCredentials.getPort(), redisCredentials.getTimeout(), redisCredentials.getMaxConnections());
+            RedisManager.initialize(redisCredentials.getHost(), redisCredentials.getPassword(), redisCredentials.getPort(), redisCredentials.getTimeout(), redisCredentials.getMaxConnections(), isReceiver);
 
         }
         if(databaseCredentials != null){
