@@ -33,6 +33,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         String key = cacheKeyPrefix + entity.getId();
         RedisManager.get().save(key, entity);
         updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
+        System.out.print("Added action to updateQueue on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
         return entity;
     }
 
@@ -91,7 +92,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             }
         }
 
-        // If not found in cache, get from database
         List<T> dbEntities = super.whereList(fieldName, value);
         if (dbEntities != null && !dbEntities.isEmpty()) {
             for (T entity : dbEntities) {
@@ -113,9 +113,12 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     }
 
     public void flushUpdates() {
+        System.out.println("Flushing updates on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
         DatabaseAction<T> action;
         while ((action = updateQueue.poll()) != null) {
             T entity = action.getEntity();
+            System.out.print("Detected updateQueue not null on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
+            System.out.print("Processing action SAVE: " + action.getType());
             switch (action.getType()) {
                 case DatabaseAction.Type.SAVE:
                     super.save(entity);
@@ -129,14 +132,16 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public List<T> all() {
+        System.out.println("LISTING ALL FROM GENERICCAHCEDREPOSITORY");
         List<T> entities = super.all();
         if (entities != null && !entities.isEmpty()) {
-            // Cache all entities
+            System.out.println("got something");
             for (T entity : entities) {
+                System.out.println("Saving entity: " + cacheKeyPrefix + entity.getId());
                 RedisManager.get().save(cacheKeyPrefix + entity.getId(), entity);
             }
-            // Cache the full list
-            RedisManager.get().save(allEntitiesKey, entities);
+        } else {
+            System.out.println("Entities is null or empty");
         }
         return entities;
     }
