@@ -18,6 +18,10 @@ public class GenericRepository<T> {
         this.threadPool = SessionManager.get().getThreadPool();
     }
 
+    public Class<T> getEntityClass() {
+        return type;
+    }
+
     public T save(T entity) {
         Session session = SessionManager.get().getSession();
         Transaction transaction = session.beginTransaction();
@@ -49,7 +53,7 @@ public class GenericRepository<T> {
         });
     }
 
-    public T findById(Long id) {
+    public T findById(Object id) {
         Session session = SessionManager.get().getSession();
         T entity = session.get(type, id);
         session.close();

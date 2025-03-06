@@ -9,6 +9,6 @@ public class UserRepository extends GenericRelayRepository<User> {
     }
 
     public User findByUuid(UUID uuid) {
-        return this.where("uuid", uuid);
+        return this.where("id", uuid);
     }
 }

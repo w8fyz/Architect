@@ -7,7 +7,11 @@ import sh.fyz.architect.repositories.GenericRepository;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
 
+import java.util.ArrayList;
+
 public class EntityChannelPubSub<T> {
+
+    private static final ArrayList<String> channels = new ArrayList<>();
 
     private GenericRepository<T> hotRepository;
 
@@ -31,9 +35,12 @@ public class EntityChannelPubSub<T> {
     }
 
     public void subscribe() {
-        System.out.println("Subscribing to channel: database-action:"+type.getEntity().getClass().getSimpleName());
+        String channel = "database-action:"+type.getEntity().getClass().getSimpleName();
         RedisManager.get().getPubSubExecutor().submit(() -> {
             try(Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
+                if(channels.contains(channel)) return;
+                System.out.println("Subscribing to channel: " + channel);
+                channels.add(channel);
                 jedis.subscribe(new JedisPubSub() {
                     @Override
                     public void onMessage(String channel, String message) {
@@ -45,7 +52,7 @@ public class EntityChannelPubSub<T> {
                             throw new RuntimeException(e);
                         }
                     }
-                }, "database-action:"+type.getEntity().getClass().getSimpleName());
+                }, channel);
             } catch (Exception e) {
                 e.printStackTrace();
             }
