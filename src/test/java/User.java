@@ -9,22 +9,23 @@ import java.util.UUID;
 public class User implements IdentifiableEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private UUID id;
 
     @Override
-    public Long getId() {
+    public UUID getId() {
         return id;
     }
 
     @Column(name = "username")
     private String username;
 
+
+    @ManyToOne
+    @JoinColumn(name = "rank_id")
+    private Rank rank;
+
     @Column(name = "password")
     private String password;
-
-    @Column(name = "uuid")
-    private UUID uuid;
 
     public User() {
     }
@@ -45,11 +46,16 @@ public class User implements IdentifiableEntity {
         this.password = password;
     }
 
-    public UUID getUuid() {
-        return uuid;
+    public void setUuid(UUID uuid) {
+        this.id = uuid;
     }
 
-    public void setUuid(UUID uuid) {
-        this.uuid = uuid;
+    public Rank getRank() {
+        return rank;
     }
+
+    public void setRank(Rank rank) {
+        this.rank = rank;
+    }
+    
 }

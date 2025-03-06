@@ -4,12 +4,17 @@ import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.persistant.SessionManager;
-import org.hibernate.Session;
+import sh.fyz.architect.anchor.Anchor;
 
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OneToOne;
+
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.lang.reflect.Field;
 
 public class GenericCachedRepository<T extends IdentifiableEntity> extends GenericRepository<T> {
     private final Class<T> type;
@@ -34,17 +39,17 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 return null;
             }
         }
-            String key = cacheKeyPrefix + entity.getId();
-            RedisManager.get().save(key, entity);
-            if(RedisManager.get().isReceiver()) {
-                updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
-                System.out.print("Added action to updateQueue on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
-            }
+        String key = cacheKeyPrefix + entity.getId();
+        RedisManager.get().save(key, entity);
+        
+        if(RedisManager.get().isReceiver()) {
+            updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
+        }
         return entity;
     }
 
     @Override
-    public T findById(Long id) {
+    public T findById(Object id) {
         String key = cacheKeyPrefix + id;
         T cachedEntity = RedisManager.get().find(key, type);
         if (cachedEntity != null) {
@@ -122,8 +127,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         DatabaseAction<T> action;
         while ((action = updateQueue.poll()) != null) {
             T entity = action.getEntity();
-            System.out.print("Detected updateQueue not null on "+(RedisManager.get().isReceiver() ? "receiver" : "server (what)"));
-            System.out.print("Processing action SAVE: " + action.getType());
             switch (action.getType()) {
                 case DatabaseAction.Type.SAVE:
                     super.save(entity);
@@ -137,12 +140,9 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public List<T> all() {
-        System.out.println("LISTING ALL FROM GENERICCAHCEDREPOSITORY");
         List<T> entities = super.all();
         if (entities != null && !entities.isEmpty()) {
-            System.out.println("got something");
             for (T entity : entities) {
-                System.out.println("Saving entity: " + cacheKeyPrefix + entity.getId());
                 RedisManager.get().save(cacheKeyPrefix + entity.getId(), entity);
             }
         } else {

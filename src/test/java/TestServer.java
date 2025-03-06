@@ -11,19 +11,26 @@ public class TestServer {
         Architect architect = new Architect().setReceiver(false)
                 .setRedisCredentials(new RedisCredentials("localhost", "1234", 6379,100, 6));
         architect.start();
+        architect.addRepositories(new UserRepository(), new RankRepository());
 
         UUID randomUUID = UUID.fromString("67047805-2dac-42d5-b4a1-18dfcc9759d9");
         UserRepository userRepository = new UserRepository();
-        User firstFetch = userRepository.findByUuid(randomUUID);
 
+        User firstFetch = userRepository.findById(randomUUID);
         System.out.println("Found first : "+firstFetch.getUsername());
-        firstFetch.setUsername("Fyzil");
-        firstFetch.setPassword("1234");
 
+        RankRepository rankRepository = new RankRepository();
+        Rank rank = rankRepository.findById(3);
+        rank.setName("Modo");
+        rankRepository.save(rank);
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        System.out.println("Rank : "+firstFetch.getRank());
 
-        userRepository.save(firstFetch);
-
-        User fetch = userRepository.findByUuid(randomUUID);
+        User fetch = userRepository.findById(randomUUID);
 
         System.out.println("Found : "+fetch.getUsername());
 
