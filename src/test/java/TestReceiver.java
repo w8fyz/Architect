@@ -13,7 +13,8 @@ public class TestReceiver {
                 .setRedisCredentials(new RedisCredentials("localhost", "1234", 6379,100, 6));
         architect.start();
         architect.addRepositories(new UserRepository(), new RankRepository(), new FriendRepository());
-
+        long start = System.currentTimeMillis();
+        System.out.println("Started");
         UUID randomUUID = UUID.fromString("67047805-2dac-42d5-b4a1-18dfcc9759d9");
         UUID randomUUID2 = UUID.fromString("11111111-2dac-42d5-b4a1-222222222222");
         UUID randomUUID3 = UUID.fromString("22222222-2dac-42d5-b4a1-111111111111");
@@ -30,29 +31,32 @@ public class TestReceiver {
         friend2.setLevel(2);
 
         friendRepository.save(friend1);
-        friendRepository.save(friend2);
 
         RankRepository rankRepository = new RankRepository();
 
-        Rank rank = rankRepository.findById(1);
+        Rank rank = new Rank();
+        rank.setName("Apagnan");
+        rankRepository.save(rank);
 
         UserRepository userRepository = new UserRepository();
 
         User fetch = new User();
-        fetch.setUuid(randomUUID);
-        fetch.setUsername("Fyz");
+        fetch.setUuid(randomUUID2);
+        fetch.setUsername("Sarah");
         fetch.setPassword("1234");
-        fetch.setRank(rank);
+        fetch.setRank(rankRepository.findById(1));
         fetch.addFriend(friend1);
-        fetch.addFriend(friend2);
 
-        userRepository.save(fetch);
+        userRepository.saveAsync(fetch, (user) -> {
+            System.out.println("Saved : "+user);
+        }, (error) -> {
+            System.out.println("Error : "+error);
+        });
+        System.out.println("Time taken : "+(System.currentTimeMillis()-start)+"ms");
 
+        //User firstFetch = userRepository.findById(randomUUID);
 
-        User firstFetch = userRepository.findById(randomUUID);
-
-        System.out.println("Found : "+firstFetch);
-
+        //System.out.println("Found : "+firstFetch);
     }
 
 }

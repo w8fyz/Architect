@@ -1,6 +1,16 @@
 package sh.fyz.architect.persistant;
 import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.ManyToMany;
+import jakarta.persistence.OneToMany;
+import javassist.ClassPool;
+import javassist.CtClass;
+import javassist.CtField;
+import javassist.bytecode.AnnotationsAttribute;
+import javassist.bytecode.ConstPool;
+import javassist.bytecode.annotation.Annotation;
+import javassist.bytecode.annotation.EnumMemberValue;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.cfg.Configuration;
@@ -9,6 +19,7 @@ import org.hibernate.cfg.Environment;
 import jakarta.persistence.Entity;
 import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
+import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Properties;
@@ -44,7 +55,6 @@ public class SessionManager {
                 settings.put("hibernate.hikari.minimumIdle", "5");
                 settings.put("hibernate.hikari.maximumPoolSize", "10");
                 settings.put("hibernate.hikari.idleTimeout", "30000");
-
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);
 
@@ -62,6 +72,8 @@ public class SessionManager {
             throw new RuntimeException("Failed to initialize Hibernate", e);
         }
     }
+
+
 
     public Class<?> getEntityClass(String name) {
         return registeredEntityClasses.get(name);

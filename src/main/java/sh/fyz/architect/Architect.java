@@ -18,11 +18,9 @@ public class Architect {
     private DatabaseCredentials databaseCredentials;
     private boolean isReceiver = true;
     private final Anchor anchor;
-    private final List<GenericRepository<? extends IdentifiableEntity>> pendingRepositories;
 
     public Architect() {
         this.anchor = Anchor.get();
-        this.pendingRepositories = new ArrayList<>();
     }
 
     public Architect setReceiver(boolean isReceiver) {
@@ -41,7 +39,16 @@ public class Architect {
     }
 
     public Architect addRepositories(GenericRepository<? extends IdentifiableEntity>... repositories) {
-        pendingRepositories.addAll(Arrays.asList(repositories));
+        if(repositories == null) {
+            return this;
+        }
+        for (GenericRepository<? extends IdentifiableEntity> repository : repositories) {
+            Class<?> entityClass = repository.getEntityClass();
+            String repositoryName = entityClass.getSimpleName().toLowerCase() + "s";
+            anchor.registerRepository(repositoryName, repository);
+            System.out.println("Registered repository for entity: " + entityClass.getSimpleName() +
+                    " using " + repository.getClass().getSimpleName());
+        }
         return this;
     }
 
@@ -75,16 +82,6 @@ public class Architect {
         } else {
             SessionManager.initialize(null, null, null, 1);
         }
-
-        // Enregistrer les repositories après l'initialisation de SessionManager
-        for (GenericRepository<? extends IdentifiableEntity> repository : pendingRepositories) {
-            Class<?> entityClass = repository.getEntityClass();
-            String repositoryName = entityClass.getSimpleName().toLowerCase() + "s";
-            anchor.registerRepository(repositoryName, repository);
-            System.out.println("Registered repository for entity: " + entityClass.getSimpleName() + 
-                " using " + repository.getClass().getSimpleName());
-        }
-        pendingRepositories.clear();
     }
 
     public void stop() {
