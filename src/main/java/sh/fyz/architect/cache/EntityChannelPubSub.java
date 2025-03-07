@@ -27,7 +27,6 @@ public class EntityChannelPubSub<T> {
             String message = new ObjectMapper().writeValueAsString(action);
             try(Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
                 jedis.publish("database-action:"+type.getEntity().getClass().getSimpleName(), message);
-                System.out.println("Published message: " + message);
             }
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e);
@@ -47,7 +46,6 @@ public class EntityChannelPubSub<T> {
                         try {
                             DatabaseAction<T> entity = new ObjectMapper().readValue(message, type.getClass());
                             RedisManager.get().getRedisQueueActionPool().add(entity, hotRepository);
-                            System.out.println("Received message: " + message);
                         } catch (JsonProcessingException e) {
                             throw new RuntimeException(e);
                         }

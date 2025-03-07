@@ -29,21 +29,9 @@ public class GenericRepository<T> {
         return type;
     }
 
-    protected void configureEagerFetch(Session session, T entity) {
-        EntityGraph<?> entityGraph = session.createEntityGraph(entity.getClass());
-        for (Field field : entity.getClass().getDeclaredFields()) {
-            if (field.isAnnotationPresent(OneToMany.class)) {
-                entityGraph.addAttributeNodes(field.getName());
-            }
-        }
-        Map<String, Object> properties = new HashMap<>();
-        properties.put(GraphSemantic.FETCH.getJpaHintName(), entityGraph);
-        session.setProperties(properties);
-    }
 
     public T save(T entity) {
         Session session = SessionManager.get().getSession();
-        configureEagerFetch(session, entity);
         Transaction transaction = session.beginTransaction();
         T savedEntity;
 

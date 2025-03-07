@@ -36,6 +36,7 @@ public class Anchor {
      *          "guilds/name:MyGuild/members"
      */
     public CompletableFuture<Optional<Object>> fetch(String dataPath) {
+        System.out.println("Fetching data from path: " + dataPath);
         return pathResolver.resolve(dataPath)
             .thenApply(result -> {
                 if (result == null) {

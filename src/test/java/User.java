@@ -21,8 +21,7 @@ public class User implements IdentifiableEntity {
     @Column(name = "username")
     private String username;
 
-    @OneToMany(fetch = FetchType.EAGER)
-    @JoinColumn(name = "user")
+    @ManyToMany(fetch = FetchType.EAGER)
     private List<Friend> friends = new ArrayList<>();
 
     @ManyToOne
