@@ -1,6 +1,8 @@
 import jakarta.persistence.*;
 import sh.fyz.architect.entities.IdentifiableEntity;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 
@@ -19,6 +21,9 @@ public class User implements IdentifiableEntity {
     @Column(name = "username")
     private String username;
 
+    @OneToMany(fetch = FetchType.EAGER)
+    @JoinColumn(name = "user")
+    private List<Friend> friends = new ArrayList<>();
 
     @ManyToOne
     @JoinColumn(name = "rank_id")
@@ -57,5 +62,28 @@ public class User implements IdentifiableEntity {
     public void setRank(Rank rank) {
         this.rank = rank;
     }
-    
+
+    public List<Friend> getFriends() {
+        return friends;
+    }
+
+    public void addFriend(Friend friend) {
+        this.friends.add(friend);
+    }
+
+    @Override
+    public String toString() {
+        String friendList = "";
+        for (Friend friend : friends) {
+            System.out.println(friend);
+            friendList += friend.getName() + ", ";
+        }
+        return "User{" +
+                "id=" + id +
+                ", username='" + username + '\'' +
+                ", friends=" + friendList +
+                ", rank=" + rank +
+                ", password='" + password + '\'' +
+                '}';
+    }
 }
