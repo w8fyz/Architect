@@ -3,11 +3,18 @@ package sh.fyz.architect.repositories;
 import sh.fyz.architect.persistant.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
+import org.hibernate.graph.GraphSemantic;
 
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.EntityGraph;
+
+import java.lang.reflect.Field;
 import java.util.List;
 
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
+import java.util.HashMap;
+import java.util.Map;
 
 public class GenericRepository<T> {
     protected final Class<T> type;
@@ -22,8 +29,21 @@ public class GenericRepository<T> {
         return type;
     }
 
+    protected void configureEagerFetch(Session session, T entity) {
+        EntityGraph<?> entityGraph = session.createEntityGraph(entity.getClass());
+        for (Field field : entity.getClass().getDeclaredFields()) {
+            if (field.isAnnotationPresent(OneToMany.class)) {
+                entityGraph.addAttributeNodes(field.getName());
+            }
+        }
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(GraphSemantic.FETCH.getJpaHintName(), entityGraph);
+        session.setProperties(properties);
+    }
+
     public T save(T entity) {
         Session session = SessionManager.get().getSession();
+        configureEagerFetch(session, entity);
         Transaction transaction = session.beginTransaction();
         T savedEntity;
 

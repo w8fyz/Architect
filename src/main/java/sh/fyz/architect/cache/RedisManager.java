@@ -5,6 +5,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.OneToOne;
+import org.hibernate.Hibernate;
 import redis.clients.jedis.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -32,9 +34,9 @@ public class RedisManager {
         config.setMaxIdle(maxConnections / 2);
         config.setMinIdle(1);
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
+        if (receiver) jedisPool.getResource().flushAll();
         this.objectMapper = new ObjectMapper();
         this.isReceiver = receiver;
-        if (receiver) jedisPool.getResource().flushAll();
     }
 
     private void createRedisPool() {
@@ -141,34 +143,32 @@ public class RedisManager {
             Object value = field.get(entity);
 
             if (value != null) {
-                if (field.isAnnotationPresent(ManyToOne.class)) {
-                    // Convert @ManyToOne entity to field_id
+                if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
+                    // Store the ID of the related entity
                     Field idField = getIdField(value.getClass());
                     if (idField != null) {
                         idField.setAccessible(true);
                         jsonMap.put(field.getName() + "_id", idField.get(value));
                     }
-                } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
-                    // Convert @OneToMany and @ManyToMany to a list of IDs
+                } 
+                else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     if (value instanceof Collection) {
-                        List<Object> ids = ((Collection<?>) value).stream()
-                                .map(item -> {
-                                    Field idField = getIdField(item.getClass());
-                                    if (idField != null) {
-                                        try {
-                                            idField.setAccessible(true);
-                                            return idField.get(item);
-                                        } catch (IllegalAccessException e) {
-                                            e.printStackTrace();
-                                        }
-                                    }
-                                    return null;
-                                })
-                                .filter(Objects::nonNull)
-                                .collect(Collectors.toList());
-                        jsonMap.put(field.getName() + "_ids", ids);
+                        List<Object> ids = new ArrayList<>();
+                        for (Object item : (Collection<?>) value) {
+                            if (item != null) {
+                                Field idField = getIdField(item.getClass());
+                                if (idField != null) {
+                                    idField.setAccessible(true);
+                                    ids.add(idField.get(item));
+                                }
+                            }
+                        }
+                        if (!ids.isEmpty()) {
+                            jsonMap.put(field.getName() + "_ids", ids);
+                        }
                     }
-                } else {
+                } 
+                else {
                     jsonMap.put(field.getName(), value);
                 }
             }
@@ -186,37 +186,42 @@ public class RedisManager {
 
                 if (rawData.containsKey(fieldName)) {
                     Object value = rawData.get(fieldName);
-
                     // Convert value if necessary
                     value = convertValue(value, field.getType());
-
                     field.set(entity, value);
-                } else if (rawData.containsKey(fieldName + "_id") && field.isAnnotationPresent(ManyToOne.class)) {
-                    // Rebuild ManyToOne relation
+                } 
+                // Handle relationships
+                else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
-                    Object relatedEntity = RedisManager.get().find(field.getType().getSimpleName() + ":" + idValue, field.getType());
-                    /*Field idField = getIdField(field.getType());
-                    if (idField != null) {
-                        idField.setAccessible(true);
-
-                        // Convert ID value type
-                        idValue = convertValue(idValue, idField.getType());
-
-                        idField.set(relatedEntity, idValue);
+                    if (idValue != null) {
+                        Object relatedEntity = find(field.getType().getSimpleName() + ":" + idValue, field.getType());
                         field.set(entity, relatedEntity);
-                    }*/
-                    field.set(entity, relatedEntity);
-                } else if (rawData.containsKey(fieldName + "_ids") &&
-                        (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class))) {
-                    // Rebuild OneToMany or ManyToMany relation
-                    List<?> ids = (List<?>) rawData.get(fieldName + "_ids");
-                    Collection<Object> relatedEntities = new ArrayList<>();
-
-                    for (Object idValue : ids) {
-                        Object relatedEntity = RedisManager.get().find(field.getType().getSimpleName() + ":" + idValue, field.getType());
-                        relatedEntities.add(relatedEntity);
                     }
-                    field.set(entity, relatedEntities);
+                }
+                else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
+                    List<?> ids = (List<?>) rawData.get(fieldName + "_ids");
+                    if (ids != null && !ids.isEmpty()) {
+                        Collection<Object> relatedEntities;
+                        
+                        // Create appropriate collection type
+                        if (List.class.isAssignableFrom(field.getType())) {
+                            relatedEntities = new ArrayList<>();
+                        } else {
+                            relatedEntities = new HashSet<>();
+                        }
+
+                        // Get the generic type of the collection
+                        Class<?> genericType = getGenericType(field);
+                        if (genericType != null) {
+                            for (Object idValue : ids) {
+                                Object relatedEntity = find(genericType.getSimpleName() + ":" + idValue, genericType);
+                                if (relatedEntity != null) {
+                                    relatedEntities.add(relatedEntity);
+                                }
+                            }
+                            field.set(entity, relatedEntities);
+                        }
+                    }
                 }
             }
             return entity;
@@ -226,6 +231,16 @@ public class RedisManager {
         }
     }
 
+    private Class<?> getGenericType(Field field) {
+        try {
+            String typeName = field.getGenericType().getTypeName();
+            if (typeName.contains("<")) {
+                String genericTypeName = typeName.substring(typeName.indexOf("<") + 1, typeName.indexOf(">"));
+                return Class.forName(genericTypeName);
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
 
     private Object convertValue(Object value, Class<?> targetType) {
         if (value == null) {

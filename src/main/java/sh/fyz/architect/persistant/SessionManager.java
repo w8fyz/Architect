@@ -37,6 +37,7 @@ public class SessionManager {
                 settings.put(Environment.DIALECT, authProvider.getDialect());
                 settings.put(Environment.HBM2DDL_AUTO, "update");
                 settings.put(Environment.SHOW_SQL, "false");
+                settings.put(Environment.GLOBALLY_QUOTED_IDENTIFIERS, "true");
 
                 Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 

@@ -39,6 +39,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 return null;
             }
         }
+        
+        // Initialize all collections before caching
+        initializeCollections(entity);
+        
         String key = cacheKeyPrefix + entity.getId();
         RedisManager.get().save(key, entity);
         
@@ -46,6 +50,26 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
         }
         return entity;
+    }
+
+    private void initializeCollections(T entity) {
+        try {
+            for (Field field : entity.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                if (field.isAnnotationPresent(OneToMany.class) || 
+                    field.isAnnotationPresent(ManyToOne.class) ||
+                    field.isAnnotationPresent(OneToOne.class)) {
+                    Object value = field.get(entity);
+                    if (value instanceof Collection) {
+                        // Force initialization of the collection
+                        ((Collection<?>) value).size();
+                    } else if (value != null) {
+                        // Force initialization of the entity
+                        value.toString();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -57,6 +81,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
         T dbEntity = super.findById(id);
         if (dbEntity != null) {
+            // Initialize collections before caching
+            initializeCollections(dbEntity);
             RedisManager.get().save(key, dbEntity);
         }
         return dbEntity;
@@ -143,6 +169,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         List<T> entities = super.all();
         if (entities != null && !entities.isEmpty()) {
             for (T entity : entities) {
+                // Initialize collections before caching
+                initializeCollections(entity);
                 RedisManager.get().save(cacheKeyPrefix + entity.getId(), entity);
             }
         } else {
