@@ -41,7 +41,8 @@ public class TestAnchor {
 
         AnchorScript script = new AnchorScript();
         String scriptText = """
-                users = fetch("users/*/order/friends.size:desc/limit/5");
+                  users = fetch("users/11111111-2dac-42d5-b4a1-222222222222");
+                  userList = map("users #{index}. {current.username} if(current.friends.size > 0, '(famous)', '(random)')");
                 """;
         System.out.println("Executing script...");
         AnchorScript.ScriptResult result = script.execute(scriptText).join();

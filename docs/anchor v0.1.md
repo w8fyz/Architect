@@ -1,193 +1,3 @@
-# Documentation complète d'Anchor
-
-## Table des matières
-1. [Introduction](#introduction)
-2. [Installation et configuration](#installation-et-configuration)
-3. [Concepts fondamentaux](#concepts-fondamentaux)
-4. [Syntaxe et fonctions](#syntaxe-et-fonctions)
-   - [La fonction fetch](#la-fonction-fetch)
-   - [La fonction map](#la-fonction-map)
-   - [Opérations conditionnelles avec if](#opérations-conditionnelles-avec-if)
-   - [Concatenation avec concat](#concatenation-avec-concat)
-   - [Manipulation des propriétés](#manipulation-des-propriétés)
-5. [Exemples pratiques](#exemples-pratiques)
-   - [Système de classement](#système-de-classement)
-   - [Profil utilisateur](#profil-utilisateur)
-   - [Analyse de données](#analyse-de-données)
-6. [Optimisation des performances](#optimisation-des-performances)
-7. [Dépannage](#dépannage)
-8. [Référence technique](#référence-technique)
-
-## Introduction
-
-Anchor est un langage de script léger conçu pour interagir avec vos entités Java de manière simple et intuitive. Contrairement aux solutions complexes comme HQL ou SQL, Anchor propose une syntaxe claire et accessible même pour les utilisateurs peu familiers avec la programmation.
-
-### Que permet Anchor?
-
-Avec Anchor, vous pouvez:
-- **Récupérer** des données depuis vos dépôts d'entités Java
-- **Transformer** ces données en formats lisibles
-- **Trier** et **limiter** les résultats selon vos besoins
-- **Manipuler** les résultats avec des conditions et des opérations de formatage
-- **Stocker** des variables intermédiaires pour un traitement étape par étape
-
-Tout cela avec une syntaxe simple et concise qui ne nécessite pas de connaissances approfondies en programmation.
-
-## Installation et configuration
-
-### Prérequis
-- Java 8+
-- Redis (pour le stockage)
-- Vos dépôts d'entités implémentant l'interface `GenericRepository`
-
-### Initialisation d'Architect
-
-Anchor fonctionne au sein d'Architect, qui gère les connexions Redis et l'enregistrement des dépôts:
-
-```java
-// Initialisation d'Architect avec Redis
-Architect architect = new Architect()
-    .setReceiver(false)
-    .setRedisCredentials(new RedisCredentials(
-        "localhost",  // Hôte Redis
-        "password",   // Mot de passe Redis
-        6379,         // Port Redis
-        100,          // Taille du pool de connexions
-        6             // Numéro de base de données
-    ));
-
-// Enregistrement de vos dépôts
-architect.addRepositories(
-    new UserRepository(),
-    new RankRepository()
-    // Ajoutez d'autres dépôts selon vos besoins
-);
-
-// Démarrage du service
-architect.start();
-```
-
-### Création d'un script Anchor
-
-```java
-// Créer une instance de script
-AnchorScript script = new AnchorScript();
-
-// Écrire un script simple
-String scriptText = """
-    users = fetch("users/*");
-    activeUsers = fetch("users/*/active");
-    topUsers = fetch("users/*/order/rank.power:desc/limit/5");
-    """;
-
-// Exécuter le script et récupérer les résultats
-AnchorScript.ScriptResult result = script.execute(scriptText).get();
-
-// Accéder aux résultats
-List<User> users = result.get("users", List.class);
-List<Boolean> activeStatus = result.get("activeUsers", List.class);
-List<User> top = result.get("topUsers", List.class);
-```
-
-## Concepts fondamentaux
-
-Anchor fonctionne sur quelques concepts simples:
-
-1. **Dépôts d'entités**: Collections d'objets que vous pouvez interroger (ex: users, ranks)
-2. **Chemins d'accès**: Chaînes de caractères décrivant comment accéder aux données
-3. **Variables**: Stockage temporaire des résultats pour une utilisation ultérieure
-4. **Transformations**: Conversion des données brutes en formats lisibles
-
-### Structure d'un script Anchor
-
-Un script Anchor est composé d'une série d'instructions, chacune terminée par un point-virgule:
-
-```
-// Commentaire explicatif
-variable = opération(paramètres);  // Une instruction
-autreVariable = autreOperation(autreVariable);  // Une autre instruction
-```
-
-## Syntaxe et fonctions
-
-### La fonction fetch
-
-La fonction `fetch` est le moyen principal d'accéder aux données. Elle permet de récupérer des entités ou leurs propriétés depuis vos dépôts.
-
-#### Syntaxe complète
-
-```
-fetch("entité/identifiant[/propriété][/order/tri][/limit/nombre]")
-```
-
-#### Paramètres détaillés
-
-| Paramètre | Description | Obligatoire | Format |
-|-----------|-------------|-------------|--------|
-| entité | Le type d'entité à récupérer | Oui | Chaîne de caractères, ex: "users" |
-| identifiant | L'ID spécifique ou "*" pour tout récupérer | Oui | UUID ou "*" |
-| propriété | Propriété spécifique à extraire | Non | Chemin d'accès avec notation point, ex: "username" ou "rank.name" |
-| order | Critère de tri | Non | Propriété + direction (":asc" ou ":desc") |
-| limit | Nombre maximal de résultats | Non | Entier positif |
-
-#### Exemples annotés
-
-```java
-// Récupère tous les utilisateurs
-users = fetch("users/*");
-
-// Récupère un utilisateur spécifique par son UUID
-user = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9");
-
-// Récupère uniquement le nom d'utilisateur
-username = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9/username");
-
-// Tri les utilisateurs par la propriété 'power' de leur rang, en ordre décroissant
-powerfulUsers = fetch("users/*/order/rank.power:desc");
-
-// Récupère uniquement les 10 premiers utilisateurs après tri
-topUsers = fetch("users/*/order/rank.power:desc/limit/10");
-
-// Récupère une propriété imbriquée pour tous les utilisateurs
-rankNames = fetch("users/*/rank.name");
-```
-
-#### Accès aux propriétés imbriquées
-
-Pour accéder à des propriétés imbriquées, utilisez la notation par point:
-
-```
-// Accède à la propriété 'name' de l'objet 'rank' de l'utilisateur
-rankName = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9/rank.name");
-
-// Accède à la taille de la collection 'friends'
-friendCount = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9/friends.size");
-```
-
-#### Tri avec 'order'
-
-Le paramètre `order` permet de trier les résultats:
-
-```
-// Tri par nombre d'amis, du plus grand au plus petit
-popularUsers = fetch("users/*/order/friends.size:desc");
-
-// Tri par nom d'utilisateur alphabétique
-alphabeticalUsers = fetch("users/*/order/username:asc");
-```
-
-#### Limitation des résultats avec 'limit'
-
-Le paramètre `limit` permet de limiter le nombre de résultats:
-
-```
-// Récupère uniquement les 5 premiers utilisateurs
-fewUsers = fetch("users/*/limit/5");
-
-// Combine tri et limitation: les 10 utilisateurs les plus puissants
-eliteUsers = fetch("users/*/order/rank.power:desc/limit/10");
-```
-
 ### La fonction map
 
 La fonction `map` permet de transformer une collection en une liste formatée. Elle est particulièrement utile pour créer des représentations lisibles des données.
@@ -213,6 +23,40 @@ map("collection[options] format_string")
 | `{current}` | Élément entier | `{current}` |
 | `{current.propriété}` | Propriété de l'élément | `{current.username}` |
 
+#### Conditions dans le format
+
+Vous pouvez maintenant utiliser des conditions `if` directement dans le format :
+
+```java
+// Format avec condition simple
+userList = map("users #{index}. {current.username} if(current.active, '(en ligne)', '(hors ligne)')");
+// Résultat: ["0. Admin (en ligne)", "1. User1 (hors ligne)", ...]
+
+// Format avec conditions multiples
+userStatus = map("users #{index}. {current.username} if(current.active, '✓', '✗') if(current.friends.size > 5, ' (populaire)', '')");
+// Résultat: ["0. Admin ✓ (populaire)", "1. User1 ✗", ...]
+```
+
+Syntaxe des conditions dans map:
+```
+if(condition, valeur_si_vrai, valeur_si_faux)
+```
+
+### Accès aux éléments d'une liste
+
+Vous pouvez maintenant accéder directement aux éléments d'une liste en utilisant l'index entre crochets :
+
+```java
+// Accès au premier élément
+firstUser = users[0];
+
+// Accès au dernier élément
+lastUser = users[users.size - 1];
+
+// Utilisation de l'élément
+username = firstUser.username;
+```
+
 #### Exemples simples
 
 ```java
@@ -232,10 +76,22 @@ reverseList = map("users[reverse:true] #{index}. {current.username}");
 #### Formatage avancé
 
 ```java
-// Formatage complexe avec plusieurs propriétés
-userDetails = map("users #{index}. {current.username} - Rang: {current.rank.name} (Puissance: {current.rank.power})");
-// Résultat: ["0. Admin - Rang: Administrateur (Puissance: 100)", ...]
+// Formatage avec plusieurs propriétés
+userDetails = map("users #{index}. {current.username} - Rang: {current.rank.name}");
+// Résultat: ["0. Admin - Rang: Administrateur", ...]
+
+// Formatage multi-lignes
+userProfiles = map("users[start:1] == Utilisateur #{index} ==
+Nom: {current.username}
+Rang: {current.rank.name}
+Amis: {current.friends.size}
+");
+// Résultat: ["== Utilisateur 1 ==\nNom: Admin\nRang: Administrateur\nAmis: 5", ...]
 ```
+
+⚠️ **Limitations importantes**:
+- La fonction `map` ne supporte pas l'utilisation de conditions (`if`) dans son format string
+- Seules les variables `{index}`, `{current}` et `{current.property}` sont supportées
 
 ### Opérations conditionnelles avec if
 
@@ -253,341 +109,205 @@ if(condition, valeur_si_vrai, valeur_si_faux)
 |------|------------|---------|
 | Comparaison numérique | `>`, `<`, `>=`, `<=`, `==`, `!=` | `user.friends.size > 5` |
 | Test d'égalité | `==`, `!=` | `user.active == true` |
-| Test de null | `== null`, `!= null` | `user.rank != null` |
-| Collection | `.size`, `.empty` | `user.friends.size` |
+| Collection | `.size` | `user.friends.size` |
 | Booléen | Directement | `user.active` |
-| Combinaison | `&&` (ET), `||` (OU) | `user.friends.size > 10 && user.active` |
+| Négation | `!` | `!user.active` |
 
-#### Exemples pratiques
+#### Exemples de conditions
 
 ```java
 // Condition simple
 status = if(user.active, "En ligne", "Hors ligne");
 
-// Condition numérique
-popularity = if(user.friends.size > 10, "Populaire", "Nouveau");
+// Condition avec NOT
+isOffline = if(!user.active, "Hors ligne", "En ligne");
 
-// Condition imbriquée
-label = if(user.rank.power > 100,
-    if(user.friends.size > 10, "Élite", "Étoile montante"),
-    "Débutant"
-);
+hasNoFriends = if(user.friends.size == 0, "Pas d'amis", "A des amis");
 
-// Vérification de valeur null
-rankName = if(user.rank != null, user.rank.name, "Sans rang");
-
-// Conditions combinées
-status = if(user.friends.size > 10 && user.active, "VIP actif", "Standard");
+// Vérification de null avec NOT
+noRank = if(user.rank == null, "Sans rang", user.rank.name);
 ```
 
-### Concatenation avec concat
+### Manipulation des collections
 
-La fonction `concat` permet de créer des chaînes de caractères en y insérant des variables.
+Les collections dans Anchor peuvent être manipulées de plusieurs façons :
 
-#### Syntaxe de base
-
-```
-concat("texte {variable} texte {autreVariable}")
-```
-
-#### Variables dans les chaînes
-
-| Format | Description | Exemple |
-|--------|-------------|---------|
-| `{variable}` | Insère la valeur d'une variable | `{users.size}` |
-| `{variable.propriété}` | Insère la valeur d'une propriété | `{user.username}` |
-| `{if(...)}` | Insère le résultat d'une condition | `{if(user.active, "En ligne", "Hors ligne")}` |
-
-#### Exemples simples
-
-```java
-// Message simple avec variable
-message = concat("Bonjour, {user.username}!");
-// Résultat: "Bonjour, Admin!"
-
-// Utilisation avec condition
-status = concat("Status: {if(user.active, 'Actif', 'Inactif')}");
-// Résultat: "Status: Actif" ou "Status: Inactif"
-```
-
-#### Formatage multi-lignes
-
-```java
-// Profil utilisateur multi-lignes
-profile = concat("""
-    Profil de {user.username}
-    Rang: {user.rank.name}
-    Amis: {user.friends.size}
-    Status: {if(user.active, "En ligne", "Hors ligne")}
-""");
-```
-
-### Manipulation des propriétés
-
-#### Accès direct aux propriétés
-
-Vous pouvez accéder directement aux propriétés des objets en utilisant la notation par point:
-
-```java
-// Accès simple
-username = user.username;
-
-// Accès imbriqué
-rankName = user.rank.name;
-rankPower = user.rank.power;
-```
-
-#### Propriétés spéciales pour les collections
+#### Accès aux propriétés des collections
 
 | Propriété | Description | Exemple |
 |-----------|-------------|---------|
 | `size` | Nombre d'éléments dans la collection | `users.size` |
-| `empty` | Booléen indiquant si la collection est vide | `users.empty` |
+
+
+⚠️ **Limitations importantes**:
+- Les collections ne peuvent être manipulées que via `fetch` et `map`
+
+#### Exemples valides
 
 ```java
-// Vérifier si une collection a des éléments
-hasUsers = !users.empty;
-
-// Utiliser la taille dans une condition
+// Récupérer la taille d'une collection
 userCount = users.size;
-hasEnoughUsers = if(userCount > 10, true, false);
+
+// Transformer une collection
+userList = map("users #{index}. {current.username}");
+
+// Trier et limiter une collection
+topUsers = fetch("users/*/order/rank.power:desc/limit/5");
 ```
 
-#### Accès par index
+# Documentation AnchorScript
+
+## Introduction
+AnchorScript est un langage de script puissant conçu pour manipuler et interroger des données de manière simple et intuitive.
+
+## Fonctions de base
+
+### fetch
+Récupère des données depuis un repository.
 
 ```java
-// Accès au premier élément (index 0)
+// Récupérer tous les utilisateurs
+users = fetch("users/*");
+
+// Récupérer un utilisateur spécifique par ID
+user = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9");
+
+// Récupérer les utilisateurs triés par nombre d'amis (descendant) avec une limite
+users = fetch("users/*/order/friends.size:desc/limit/5");
+```
+
+### map
+Transforme une collection en appliquant un format à chaque élément.
+
+```java
+// Format simple avec numérotation
+userList = map("users #{index}. {current.username}");
+
+// Format avec condition sur le nombre d'amis
+userList = map("users #{index}. {current.username} ({current.friends.size} friends)");
+
+// Format avec condition et ordre inversé
+userList = map("users[reverse:true] #{index}. {current.username}");
+```
+
+### if
+Évalue une condition et retourne une valeur en fonction du résultat.
+
+```java
+// Condition simple
+status = if(user.active, "Actif", "Inactif");
+
+// Condition inversée avec l'opérateur !
+status = if(!user.active, "Inactif", "Actif");
+
+// Condition sur le nombre d'amis
+status = if(user.friends.size > 5, "Populaire", "Nouveau");
+
+// Condition inversée sur une collection
+hasNoFriends = if(!user.friends, "Pas d'amis", "A des amis");
+```
+
+## Exemples complets
+
+### 1. Affichage des utilisateurs avec leur statut
+```java
+// Récupérer tous les utilisateurs
+users = fetch("users/*");
+
+// Créer une liste formatée avec statut d'activité
+userStatus = map("users #{index}. {current.username} status : {current.status}");
+```
+
+### 2. Liste des utilisateurs populaires
+```java
+// Récupérer les utilisateurs triés par nombre d'amis
+users = fetch("users/*/order/friends.size:desc/limit/3");
+
+// Afficher les utilisateurs avec leur rang
+topUsers = map("users #{index}. {current.username} - Rank: {current.rank.name}");
+```
+
+### 3. Manipulation de variables et conditions
+```java
+// Récupérer les utilisateurs
+users = fetch("users/*");
+
+// Accéder au premier utilisateur
 firstUser = users[0];
 
-// Accès à un élément spécifique
-thirdUser = users[2];
+// Extraire le nom d'utilisateur
+username = firstUser.username;
+
+// Formater avec concat
+formatted = concat("User: {username}");
 ```
 
-## Exemples pratiques
-
-### Système de classement
-
-Créer un classement des joueurs en fonction de leur puissance:
-
+### 4. Opérations sur les collections
 ```java
-// Script complet pour un système de classement
-script = """
-    // Récupération des utilisateurs triés par puissance
-    users = fetch("users/*/order/rank.power:desc");
-    
-    // En-tête du classement
-    header = concat("🏆 CLASSEMENT DES JOUEURS 🏆");
-    
-    // Liste des joueurs formatée avec détails
-    leaderboard = map("users[start:1] #{index}. {current.username}
-        ├─ Rang: {current.rank.name}
-        ├─ Puissance: {current.rank.power}
-        ├─ Amis: {current.friends.size}
-        └─ Status: {if(current.active, "✓ En ligne", "✗ Hors ligne")}
-    ");
-    
-    // Statistiques globales
-    totalPlayers = users.size;
-    activePlayers = fetch("users/*/active").size;
-    stats = concat("""
-        📊 Statistiques
-        ├─ Total des joueurs: {totalPlayers}
-        └─ Joueurs actifs: {activePlayers}
-    """);
-""";
-```
-
-### Profil utilisateur
-
-Créer un profil détaillé pour un utilisateur spécifique:
-
-```java
-// Script pour un profil utilisateur détaillé
-script = """
-    // Récupération de l'utilisateur spécifique
-    user = fetch("users/" + userId);
-    
-    // Vérification que l'utilisateur existe
-    exists = user != null;
-    
-    // Création du profil si l'utilisateur existe
-    profile = if(exists,
-        concat("""
-            👤 {user.username}
-            {if(user.rank != null, concat("📊 ", user.rank.name), "🆕 Sans rang")}
-            
-            📈 Statistiques:
-            ├─ Amis: {user.friends.size}
-            ├─ Puissance: {if(user.rank != null, user.rank.power, "0")}
-            ├─ Status: {if(user.active, "✅ En ligne", "❌ Hors ligne")}
-            └─ Membre depuis: {user.createdAt}
-        """),
-        "❌ Utilisateur non trouvé"
-    );
-    
-    // Liste des amis (si l'utilisateur existe et a des amis)
-    friendsList = if(exists && user.friends.size > 0,
-        map("user.friends ・{current.username} ({if(current.active, 'En ligne', 'Hors ligne')})"),
-        ["Aucun ami"]
-    );
-""";
-```
-
-### Analyse de données
-
-Extraire et analyser des statistiques sur les utilisateurs:
-
-```java
-// Script d'analyse des données utilisateurs
-script = """
-    // Récupération des données de base
-    allUsers = fetch("users/*");
-    activeUsers = fetch("users/*/active");
-    
-    // Statistiques générales
-    totalUsers = allUsers.size;
-    activeCount = activeUsers.size;
-    activePercentage = (activeCount * 100) / totalUsers;
-    
-    // Répartition par rang
-    users = fetch("users/*");
-    adminCount = 0;
-    moderatorCount = 0;
-    regularCount = 0;
-    
-    // Boucle sur les utilisateurs pour compter par rôle
-    for (user in users) {
-        if (user.rank.name == "Admin") {
-            adminCount = adminCount + 1;
-        } else if (user.rank.name == "Moderator") {
-            moderatorCount = moderatorCount + 1;
-        } else {
-            regularCount = regularCount + 1;
-        }
-    }
-    
-    // Génération du rapport
-    report = concat("""
-        📊 RAPPORT D'ANALYSE 📊
-        
-        Utilisateurs:
-        ├─ Total: {totalUsers}
-        ├─ Actifs: {activeCount} ({activePercentage}%)
-        └─ Inactifs: {totalUsers - activeCount} ({100 - activePercentage}%)
-        
-        Répartition par rang:
-        ├─ Admins: {adminCount} ({(adminCount * 100) / totalUsers}%)
-        ├─ Modérateurs: {moderatorCount} ({(moderatorCount * 100) / totalUsers}%)
-        └─ Réguliers: {regularCount} ({(regularCount * 100) / totalUsers}%)
-    """);
-""";
-```
-
-## Optimisation des performances
-
-### Bonnes pratiques
-
-1. **Limiter les résultats volumineux**:
-```java
-// Recommandé
-users = fetch("users/*/limit/100");
-// Éviter pour de grandes collections
+// Récupérer les utilisateurs
 users = fetch("users/*");
-```
 
-2. **Récupérer uniquement les propriétés nécessaires**:
-```java
-// Efficace (ne récupère que les noms)
-usernames = fetch("users/*/username");
-// Moins efficace (récupère toutes les entités)
-users = fetch("users/*");
-usernames = map("users {current.username}");
-```
-
-3. **Utiliser le tri côté serveur**:
-```java
-// Efficace (tri au niveau du dépôt)
-topUsers = fetch("users/*/order/rank.power:desc/limit/10");
-// Inefficace (tri manuel)
-users = fetch("users/*");
-// ... code de tri manuel ...
-```
-
-4. **Accéder directement aux propriétés spécifiques**:
-```java
-// Efficace (ne récupère que la propriété spécifique)
-username = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9/username");
-// Moins efficace (récupère toute l'entité)
-user = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9");
-username = user.username;
-```
-
-### À éviter
-
-1. **Récupération inutile d'entités complètes**:
-```java
-// Inefficace - récupère toutes les entités pour un simple comptage
-users = fetch("users/*");
+// Compter le nombre d'utilisateurs
 count = users.size;
 
-// Meilleure approche
-count = fetch("users/*").size;
+// Vérifier si la collection n'est pas vide
+hasUsers = count > 0;
 ```
 
-2. **Transformations en chaîne inutiles**:
+### 5. Conditions complexes
 ```java
-// Inefficace - transformations multiples
-users = fetch("users/*");
-names = map("users {current.username}");
-formattedNames = map("names User: {current}");
+// Récupérer un utilisateur
+user = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9");
 
-// Meilleure approche - une seule transformation
-formattedNames = map("users User: {current.username}");
+// Vérifier plusieurs conditions
+isNotActive = !user.active;
+hasNoFriends = !(user.friends.size > 0);
+
+// Créer une liste avec conditions multiples
+userList = map("users #{index}. {current.username} if(current.active, '✓', '✗') if(current.friends.size > 5, ' (popular)', '')");
 ```
 
-## Dépannage
+## Opérateurs
 
-### Erreurs courantes et solutions
-
-| Erreur | Cause probable | Solution |
-|--------|----------------|----------|
-| `NullPointerException` | Accès à une propriété d'un objet null | Vérifiez l'existence avec `if(objet != null, ...)` |
-| `ClassCastException` | Tentative de conversion incorrecte | Assurez-vous que les types sont compatibles |
-| `Chemin invalide` | Format de chemin incorrect | Vérifiez la syntaxe du chemin d'accès |
-| `Repository not found` | Dépôt non enregistré | Vérifiez l'enregistrement du dépôt dans Architect |
-| `No entity found with ID` | Entité inexistante | Vérifiez que l'ID existe ou gérez le cas null |
-
-### Débogage
-
-Pour faciliter le débogage, vous pouvez stocker des valeurs intermédiaires:
+### Opérateur de négation (!)
+L'opérateur `!` peut être utilisé pour inverser une condition :
 
 ```java
-// Stockez et affichez des valeurs intermédiaires
-users = fetch("users/*");
-userCount = users.size;
-message = concat("Nombre d'utilisateurs: {userCount}");
+// Dans une fonction if
+status = if(!user.active, "Inactif", "Actif");
+status = if(!(user.friends.size > 0), "Pas d'amis", "A des amis");
+
+// Dans une comparaison
+isNotActive = !user.active;
+hasNoFriends = !user.friends;
 ```
 
-## Référence technique
+### Opérateurs de comparaison
+- `>` : supérieur à
+- `<` : inférieur à
+- `==` : égal à
+- `!=` : différent de
+- `>=` : supérieur ou égal à
+- `<=` : inférieur ou égal à
 
-### Types de données supportés
+```java
+// Exemples
+hasManyFriends = user.friends.size > 10;
+isNewUser = user.level < 5;
+isAdmin = user.role == "admin";
+```
 
-| Type Java | Utilisation dans Anchor | Notes |
-|-----------|------------------------|-------|
-| String | Texte et identifiants | Utilisé pour les noms, descriptions, etc. |
-| Integer, Long | Valeurs numériques | Utilisé pour les compteurs, IDs numériques |
-| Boolean | Conditions | true/false pour les états |
-| List, Collection | Collections d'objets | Accès par index, taille, etc. |
-| Map | Dictionnaires | Accès aux valeurs par clé |
-| Custom objects | Entités | Accès aux propriétés avec notation point |
+## Bonnes pratiques
 
-### Opérateurs supportés
+1. Utilisez des noms de variables descriptifs
+2. Préférez les conditions simples aux conditions complexes
+3. Utilisez le formatage approprié pour une meilleure lisibilité
+4. Commentez votre code pour expliquer les opérations complexes
+5. Vérifiez toujours les valeurs null avant d'accéder aux propriétés
 
-| Catégorie | Opérateurs | Exemple |
-|-----------|------------|---------|
-| Arithmétique | `+`, `-`, `*`, `/` | `count = users.size + 1` |
-| Comparaison | `>`, `<`, `>=`, `<=`, `==`, `!=` | `isAdmin = user.role == "ADMIN"` |
-| Logique | `&&` (ET), `\|\|` (OU), `!` (NON) | `canEdit = isAdmin \|\| hasPermission` |
-| Accès | `.` (propriété), `[]` (index) | `user.name`, `users[0]` |
+## Notes importantes
 
-Cette documentation couvre l'ensemble des fonctionnalités d'Anchor et devrait vous permettre de créer des scripts puissants tout en restant simples et lisibles. N'hésitez pas à explorer les différentes combinaisons de fonctions pour obtenir exactement le comportement dont vous avez besoin. 
+- Les collections commencent à l'index 0
+- Les conditions dans `map` et `if` peuvent utiliser l'opérateur `!`
+- Les propriétés des objets sont accessibles avec la notation point (`.`)
+- La propriété `size` est disponible pour toutes les collections 
