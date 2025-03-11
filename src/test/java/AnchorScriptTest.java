@@ -210,4 +210,73 @@ public class AnchorScriptTest {
         assertTrue(result.get("count") instanceof Integer);
         assertTrue(result.get("hasUsers") instanceof Boolean);
     }
+
+    @Test
+    @DisplayName("Test if condition in map")
+    void testIfInMap() throws ExecutionException, InterruptedException {
+        String scriptText = """
+            users = fetch("users/*");
+            userStatus = map("users #{index}. {current.username} if(current.active, '(online)', '(offline)')");
+            """;
+        AnchorScript.ScriptResult result = script.execute(scriptText).get();
+        
+        assertNotNull(result);
+        List<String> mappedResults = result.getMapped("userStatus");
+        assertNotNull(mappedResults);
+        assertFalse(mappedResults.isEmpty());
+        assertTrue(mappedResults.get(0).contains("(online)") || mappedResults.get(0).contains("(offline)"));
+    }
+
+    @Test
+    @DisplayName("Test list indexing")
+    void testListIndexing() throws ExecutionException, InterruptedException {
+        String scriptText = """
+            users = fetch("users/*");
+            firstUser = users[0];
+            username = firstUser.username;
+            """;
+        AnchorScript.ScriptResult result = script.execute(scriptText).get();
+        
+        assertNotNull(result);
+        assertNotNull(result.get("firstUser"));
+        assertNotNull(result.get("username"));
+        assertTrue(result.get("username") instanceof String);
+    }
+
+    @Test
+    @DisplayName("Test NOT operator")
+    void testNotOperator() throws ExecutionException, InterruptedException {
+        String scriptText = """
+            user = fetch("users/67047805-2dac-42d5-b4a1-18dfcc9759d9");
+            isNotActive = !user.active;
+            hasNoFriends = !(user.friends.size > 0);
+            """;
+        AnchorScript.ScriptResult result = script.execute(scriptText).get();
+        
+        assertNotNull(result);
+        assertNotNull(result.get("isNotActive"));
+        assertNotNull(result.get("hasNoFriends"));
+        assertTrue(result.get("isNotActive") instanceof Boolean);
+        assertTrue(result.get("hasNoFriends") instanceof Boolean);
+    }
+
+    @Test
+    @DisplayName("Test complex map with if and indexing")
+    void testComplexMapWithIfAndIndexing() throws ExecutionException, InterruptedException {
+        String scriptText = """
+            users = fetch("users/*");
+            firstUser = users[0];
+            lastUser = users[users.size - 1];
+            userList = map("users #{index}. {current.username} if(current.active, '✓', '✗') if(current.friends.size > 5, ' (popular)', '')");
+            """;
+        AnchorScript.ScriptResult result = script.execute(scriptText).get();
+        
+        assertNotNull(result);
+        assertNotNull(result.get("firstUser"));
+        assertNotNull(result.get("lastUser"));
+        List<String> mappedResults = result.getMapped("userList");
+        assertNotNull(mappedResults);
+        assertFalse(mappedResults.isEmpty());
+        assertTrue(mappedResults.get(0).contains("✓") || mappedResults.get(0).contains("✗"));
+    }
 } 

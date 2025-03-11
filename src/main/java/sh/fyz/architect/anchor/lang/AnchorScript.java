@@ -21,6 +21,14 @@ public class AnchorScript {
         "([a-zA-Z][a-zA-Z0-9_]*)\\s*\\(((?:[^()]*|\\([^()]*\\))*)\\)"  // matches function calls with nested parentheses
     );
 
+    private static final Pattern LIST_INDEX_PATTERN = Pattern.compile(
+        "([a-zA-Z][a-zA-Z0-9_]*?)\\[(\\d+)\\]"  // matches list[index] syntax
+    );
+
+    private static final Pattern MAP_IF_PATTERN = Pattern.compile(
+        "if\\((.*?),\\s*(.*?),\\s*(.*?)\\)"  // matches if(condition, true_value, false_value) in map strings
+    );
+
     private final Map<String, Object> variables;
     private final DataPathResolver pathResolver;
     private final List<String> debugMessages;
@@ -148,6 +156,43 @@ public class AnchorScript {
     private CompletableFuture<Object> evaluateExpression(String expr) {
         debug("Evaluating expression: " + expr);
         
+        // Handle NOT operator
+        if (expr.trim().startsWith("!")) {
+            String subExpr = expr.trim().substring(1);
+            return evaluateExpression(subExpr).thenApply(result -> {
+                if (result instanceof Boolean) {
+                    return !(Boolean) result;
+                } else if (result instanceof Number) {
+                    return ((Number) result).doubleValue() == 0;
+                } else if (result instanceof Collection) {
+                    return ((Collection<?>) result).isEmpty();
+                } else if (result instanceof String) {
+                    String str = ((String) result).trim().toLowerCase();
+                    if (str.equals("true") || str.equals("false")) {
+                        return !Boolean.parseBoolean(str);
+                    }
+                    return str.isEmpty();
+                }
+                return result == null;
+            });
+        }
+
+        // Handle list indexing
+        Matcher indexMatcher = LIST_INDEX_PATTERN.matcher(expr.trim());
+        if (indexMatcher.matches()) {
+            String listName = indexMatcher.group(1);
+            int index = Integer.parseInt(indexMatcher.group(2));
+            Object value = variables.get(listName);
+            
+            if (value instanceof List) {
+                List<?> list = (List<?>) value;
+                if (index >= 0 && index < list.size()) {
+                    return CompletableFuture.completedFuture(list.get(index));
+                }
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+
         // Check for function calls first - use find() instead of matches() to handle nested calls
         Matcher matcher = FUNCTION_PATTERN.matcher(expr.trim());
         debug("Checking for function call in: " + expr.trim());
@@ -517,154 +562,65 @@ public class AnchorScript {
                 yield CompletableFuture.completedFuture(null);
             }
             case "map" -> {
-                debug("Map: Starting mapping operation with args: " + args);
-                
-                // Get the collection path and format string
-                String[] parts = args.split(" ", 2);
+                String[] parts = args.split("\\s+", 2);
                 if (parts.length != 2) {
-                    debug("Map: Invalid arguments - expected 2 parts but got " + parts.length);
+                    debug("Map: Invalid format - missing collection path or format string");
                     yield CompletableFuture.completedFuture(null);
                 }
-
-                // Parse options from the collection path
-                String collectionPath = parts[0];
-                String formatString = parts[1];
-                int startIndex = 0;
-                boolean reverse = false;
-
-                // Check for options in collection path
-                if (collectionPath.contains("[")) {
-                    int optionsStart = collectionPath.indexOf("[");
-                    int optionsEnd = collectionPath.indexOf("]");
-                    if (optionsEnd > optionsStart) {
-                        String options = collectionPath.substring(optionsStart + 1, optionsEnd);
-                        collectionPath = collectionPath.substring(0, optionsStart);
-                        
-                        // Parse options
-                        for (String option : options.split(",")) {
-                            String[] optParts = option.split(":");
-                            if (optParts.length == 2) {
-                                if (optParts[0].equals("start")) {
-                                    try {
-                                        startIndex = Integer.parseInt(optParts[1]);
-                                    } catch (NumberFormatException e) {
-                                        debug("Map: Invalid start index: " + optParts[1]);
-                                    }
-                                } else if (optParts[0].equals("reverse")) {
-                                    reverse = Boolean.parseBoolean(optParts[1]);
-                                }
-                            }
-                        }
+                
+                String collectionPath = parts[0].trim();
+                String formatString = parts[1].trim();
+                debug("Map: Processing collection path: " + collectionPath);
+                debug("Map: Format string: " + formatString);
+                
+                // Get the collection or single item to map over
+                Object value;
+                if (collectionPath.contains(".")) {
+                    String[] pathParts = collectionPath.split("\\.");
+                    value = variables.get(pathParts[0]);
+                    for (int i = 1; i < pathParts.length && value != null; i++) {
+                        value = getPropertyValue(value, pathParts[i]);
                     }
+                } else {
+                    value = variables.get(collectionPath);
                 }
                 
-                debug("Map: Collection path: " + collectionPath + ", format string: " + formatString);
-                debug("Map: Options - start index: " + startIndex + ", reverse: " + reverse);
+                debug("Map: Value to map over: " + value);
                 
-                String[] pathParts = collectionPath.split("\\.");
-                Object value = variables.get(pathParts[0]);
-                debug("Map: Initial value from variables[" + pathParts[0] + "]: " + (value != null ? value.getClass().getSimpleName() + " with value: " + value : "null"));
-                
-                // Get the variable name from the assignment in execute method
-                String variableName = variables.get("__current_assignment__") != null ? 
-                    variables.get("__current_assignment__").toString() : pathParts[0];
-                debug("Map: Using variable name: " + variableName);
-                
-                // Navigate to the collection
-                for (int i = 1; i < pathParts.length && value != null; i++) {
-                    debug("Map: Navigating path part " + pathParts[i]);
-                    value = getFieldValue(value, pathParts[i]);
-                    debug("Map: After navigation, value is: " + (value != null ? value.getClass().getSimpleName() + " with value: " + value : "null"));
-                }
-
-                if (!(value instanceof Collection)) {
-                    debug("Map: Value is not a collection: " + (value != null ? value.getClass().getSimpleName() : "null"));
+                if (value == null) {
+                    debug("Map: Value is null");
                     yield CompletableFuture.completedFuture(null);
                 }
-
-                Collection<?> collection = (Collection<?>) value;
-                debug("Map: Found collection with " + collection.size() + " elements");
-                debug("Map: Collection contents: " + collection);
-
+                
+                Collection<?> items;
+                if (value instanceof Collection) {
+                    items = (Collection<?>) value;
+                } else {
+                    items = List.of(value);
+                }
+                
+                debug("Map: Processing " + items.size() + " items");
+                
                 // Create a list to store the mapped values
                 List<String> mappedValues = new ArrayList<>();
-                List<?> items = new ArrayList<>(collection);
+                int index = 1; // Start index at 1 for user-friendly numbering
                 
-                // Reverse the list if needed
-                if (reverse) {
-                    Collections.reverse(items);
-                }
-
-                // Process each item in the collection
-                int currentIndex = startIndex;
+                // Process each item
                 for (Object item : items) {
-                    debug("Map: Processing item " + currentIndex + ": " + item);
-                    // Store the current item and index temporarily for variable access
-                    variables.put("current", item);
-                    variables.put("index", currentIndex);
-                    debug("Map: Set current variable to: " + item);
-                    debug("Map: Set index variable to: " + currentIndex);
-                    
-                    // Use the same variable processing as concat
-                    StringBuilder itemResult = new StringBuilder();
-                    String tempFormatString = formatString;
-                    int start = 0;
-                    int end;
-                    
-                    while ((start = tempFormatString.indexOf("{", start)) != -1) {
-                        // Add any text before the variable
-                        if (start > 0) {
-                            itemResult.append(tempFormatString.substring(0, start));
-                        }
-                        
-                        // Find the end of the variable reference
-                        end = tempFormatString.indexOf("}", start);
-                        if (end == -1) {
-                            itemResult.append(tempFormatString.substring(start));
-                            break;
-                        }
-                        
-                        // Extract and process the variable reference
-                        String varRef = tempFormatString.substring(start + 1, end).trim();
-                        debug("  Processing variable reference: " + varRef);
-                        
-                        // Handle special case for index
-                        if (varRef.equals("index")) {
-                            itemResult.append(currentIndex);
-                        } else {
-                            // Handle object property access (e.g., current.name)
-                            String[] varParts = varRef.split("\\.");
-                            Object varValue = variables.get(varParts[0]);
-                            
-                            // If we have property access (e.g., current.name)
-                            for (int i = 1; i < varParts.length && varValue != null; i++) {
-                                varValue = getFieldValue(varValue, varParts[i]);
-                            }
-                            
-                            debug("  Variable {" + varRef + "} = " + varValue);
-                            if (varValue != null) {
-                                itemResult.append(varValue);
-                            }
-                        }
-                        
-                        // Move past the processed variable
-                        tempFormatString = tempFormatString.substring(end + 1);
-                        start = 0;
-                    }
-                    
-                    // Add any remaining text
-                    if (!tempFormatString.isEmpty()) {
-                        itemResult.append(tempFormatString);
-                    }
-                    
-                    // Store the result with an index using the assignment variable name as prefix
-                    String result = itemResult.toString();
-                    mappedValues.add(result);
-                    variables.put(variableName + "_" + (currentIndex - startIndex), result);
-                    debug("Mapped " + variableName + "_" + (currentIndex - startIndex) + " = " + result);
-                    currentIndex++;
+                    debug("Map: Processing item " + index + ": " + item);
+                    String mappedValue = processMapString(formatString, item, index);
+                    debug("Map: Mapped value: " + mappedValue);
+                    mappedValues.add(mappedValue);
+                    index++;
                 }
-
+                
+                // Store results in variables with indexed keys
+                String variableName = variables.get("__current_assignment__").toString();
+                for (int i = 0; i < mappedValues.size(); i++) {
+                    variables.put(variableName + "_" + i, mappedValues.get(i));
+                }
+                
+                debug("Map: Final mapped values: " + mappedValues);
                 yield CompletableFuture.completedFuture(mappedValues);
             }
             case "if" -> {
@@ -719,8 +675,16 @@ public class AnchorScript {
                 debug("  True result: " + trueResult);
                 debug("  False result: " + falseResult);
 
+                // Check if condition starts with ! and handle inversion
+                final boolean shouldInvertResult = condition.trim().startsWith("!");
+                final String finalCondition = shouldInvertResult ? condition.substring(1).trim() : condition;
+                
+                if (shouldInvertResult) {
+                    debug("  Inverting condition. New condition: " + finalCondition);
+                }
+
                 // First evaluate the condition
-                CompletableFuture<Object> result = evaluateExpression(condition)
+                CompletableFuture<Object> result = evaluateExpression(finalCondition)
                     .thenCompose(conditionResult -> {
                         debug("Condition result: " + conditionResult + " (" + (conditionResult != null ? conditionResult.getClass().getSimpleName() : "null") + ")");
                         debug("Raw condition result: " + conditionResult);
@@ -750,7 +714,12 @@ public class AnchorScript {
                             debug("Null check evaluation: " + conditionResult + " -> " + isTrue);
                         }
                         
-                        debug("Condition evaluated to: " + isTrue);
+                        // Apply inversion if needed
+                        if (shouldInvertResult) {
+                            isTrue = !isTrue;
+                            debug("Inverted condition result to: " + isTrue);
+                        }
+                        
                         debug("Final condition result: " + isTrue);
                         
                         // Now evaluate the appropriate result expression
@@ -873,5 +842,209 @@ public class AnchorScript {
 
     public void setVariable(String name, Object value) {
         variables.put(name, value);
+    }
+
+    private String processMapString(String formatString, Object item, int index) {
+        StringBuilder result = new StringBuilder();
+        int pos = 0;
+        
+        debug("ProcessMapString: Starting with format: " + formatString);
+        debug("ProcessMapString: Current item: " + item);
+        
+        // Store the current item in variables temporarily for condition evaluation
+        Object previousCurrent = variables.get("current");
+        variables.put("current", item);
+        
+        try {
+            while (pos < formatString.length()) {
+                int ifStart = formatString.indexOf("if(", pos);
+                int varStart = formatString.indexOf("{", pos);
+                
+                if (ifStart == -1 && varStart == -1) {
+                    result.append(formatString.substring(pos));
+                    break;
+                }
+                
+                if (ifStart != -1 && (varStart == -1 || ifStart < varStart)) {
+                    // Handle if condition
+                    result.append(formatString.substring(pos, ifStart));
+                    Matcher ifMatcher = MAP_IF_PATTERN.matcher(formatString.substring(ifStart));
+                    if (ifMatcher.find()) {
+                        String condition = ifMatcher.group(1).trim();
+                        String trueValue = ifMatcher.group(2).trim().replace("'", "");
+                        String falseValue = ifMatcher.group(3).trim().replace("'", "");
+                        
+                        debug("ProcessMapString: Found if condition: " + condition);
+                        debug("ProcessMapString: True value: " + trueValue);
+                        debug("ProcessMapString: False value: " + falseValue);
+                        
+                        try {
+                            boolean isTrue = false;
+                            
+                            if (condition.startsWith("current.")) {
+                                String propertyPath = condition.substring(8);
+                                String[] parts = propertyPath.split("\\s+");
+                                
+                                if (parts.length == 3 && parts[1].equals(">")) {
+                                    // Handle comparison case: current.property > value
+                                    Object value = getPropertyValue(item, parts[0]);
+                                    debug("ProcessMapString: Got property value: " + value);
+                                    
+                                    if (value instanceof Number) {
+                                        double numValue = ((Number) value).doubleValue();
+                                        double compareValue = Double.parseDouble(parts[2]);
+                                        isTrue = numValue > compareValue;
+                                        debug("ProcessMapString: Comparing " + numValue + " > " + compareValue + " = " + isTrue);
+                                    } else if (value instanceof Collection) {
+                                        int size = ((Collection<?>) value).size();
+                                        double compareValue = Double.parseDouble(parts[2]);
+                                        isTrue = size > compareValue;
+                                        debug("ProcessMapString: Comparing collection size " + size + " > " + compareValue + " = " + isTrue);
+                                    }
+                                } else {
+                                    // Handle direct property access
+                                    Object value = getPropertyValue(item, propertyPath);
+                                    debug("ProcessMapString: Direct property value: " + value);
+                                    
+                                    if (value instanceof Number) {
+                                        isTrue = ((Number) value).doubleValue() > 0;
+                                    } else if (value instanceof Collection) {
+                                        isTrue = !((Collection<?>) value).isEmpty();
+                                    } else if (value instanceof Boolean) {
+                                        isTrue = (Boolean) value;
+                                    } else {
+                                        isTrue = value != null;
+                                    }
+                                }
+                            }
+                            
+                            debug("ProcessMapString: Condition evaluated to: " + isTrue);
+                            result.append(isTrue ? trueValue : falseValue);
+                        } catch (Exception e) {
+                            debug("ProcessMapString: Error evaluating condition: " + e.getMessage());
+                            e.printStackTrace();
+                            result.append("ERROR");
+                        }
+                        pos = ifStart + ifMatcher.end();
+                    } else {
+                        result.append("if(");
+                        pos = ifStart + 3;
+                    }
+                } else {
+                    // Handle variable replacement
+                    result.append(formatString.substring(pos, varStart));
+                    int end = formatString.indexOf("}", varStart);
+                    if (end == -1) {
+                        result.append(formatString.substring(varStart));
+                        break;
+                    }
+                    
+                    String var = formatString.substring(varStart + 1, end).trim();
+                    debug("ProcessMapString: Processing variable: " + var);
+                    
+                    if (var.equals("index")) {
+                        result.append(index);
+                    } else if (var.equals("current")) {
+                        result.append(item);
+                    } else if (var.startsWith("current.")) {
+                        String property = var.substring(8);
+                        Object value = getPropertyValue(item, property);
+                        debug("ProcessMapString: Got property value: " + value);
+                        result.append(value != null ? value : "null");
+                    }
+                    pos = end + 1;
+                }
+            }
+            
+            String finalResult = result.toString();
+            debug("ProcessMapString: Final result: " + finalResult);
+            return finalResult;
+        } finally {
+            // Restore the previous current value
+            if (previousCurrent != null) {
+                variables.put("current", previousCurrent);
+            } else {
+                variables.remove("current");
+            }
+        }
+    }
+
+    private Object getPropertyValue(Object entity, String propertyPath) {
+        if (entity == null) {
+            return null;
+        }
+
+        try {
+            // Special handling for size property on collections
+            if (propertyPath.equals("size") && entity instanceof Collection) {
+                return ((Collection<?>) entity).size();
+            }
+
+            // For nested properties (e.g. rank.name)
+            if (propertyPath.contains(".")) {
+                String[] parts = propertyPath.split("\\.");
+                Object current = entity;
+                
+                for (String part : parts) {
+                    if (current == null) {
+                        return null;
+                    }
+                    
+                    // Special handling for size property on collections
+                    if (part.equals("size") && current instanceof Collection) {
+                        current = ((Collection<?>) current).size();
+                        continue;
+                    }
+                    
+                    // Get field value using reflection
+                    try {
+                        java.lang.reflect.Field field = current.getClass().getDeclaredField(part);
+                        field.setAccessible(true);
+                        current = field.get(current);
+                    } catch (NoSuchFieldException e) {
+                        // Try superclass if field not found
+                        Class<?> superClass = current.getClass().getSuperclass();
+                        while (superClass != null) {
+                            try {
+                                java.lang.reflect.Field field = superClass.getDeclaredField(part);
+                                field.setAccessible(true);
+                                current = field.get(current);
+                                break;
+                            } catch (NoSuchFieldException ex) {
+                                superClass = superClass.getSuperclass();
+                            }
+                        }
+                        if (superClass == null) {
+                            return null;
+                        }
+                    }
+                }
+                return current;
+            }
+            // For simple properties
+            else {
+                try {
+                    java.lang.reflect.Field field = entity.getClass().getDeclaredField(propertyPath);
+                    field.setAccessible(true);
+                    return field.get(entity);
+                } catch (NoSuchFieldException e) {
+                    // Try superclass if field not found
+                    Class<?> superClass = entity.getClass().getSuperclass();
+                    while (superClass != null) {
+                        try {
+                            java.lang.reflect.Field field = superClass.getDeclaredField(propertyPath);
+                            field.setAccessible(true);
+                            return field.get(entity);
+                        } catch (NoSuchFieldException ex) {
+                            superClass = superClass.getSuperclass();
+                        }
+                    }
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            debug("Error accessing property: " + e.getMessage());
+            return null;
+        }
     }
 } 
