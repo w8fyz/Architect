@@ -74,7 +74,6 @@ public class User implements IdentifiableEntity {
     public String toString() {
         String friendList = "";
         for (Friend friend : friends) {
-            System.out.println(friend);
             friendList += friend.getName() + ", ";
         }
         return "User{" +

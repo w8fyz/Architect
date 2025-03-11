@@ -46,8 +46,6 @@ public class Architect {
             Class<?> entityClass = repository.getEntityClass();
             String repositoryName = entityClass.getSimpleName().toLowerCase() + "s";
             anchor.registerRepository(repositoryName, repository);
-            System.out.println("Registered repository for entity: " + entityClass.getSimpleName() +
-                    " using " + repository.getClass().getSimpleName());
         }
         return this;
     }
