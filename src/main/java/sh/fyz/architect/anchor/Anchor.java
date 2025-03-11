@@ -36,7 +36,6 @@ public class Anchor {
      *          "guilds/name:MyGuild/members"
      */
     public CompletableFuture<Optional<Object>> fetch(String dataPath) {
-        System.out.println("Fetching data from path: " + dataPath);
         return pathResolver.resolve(dataPath)
             .thenApply(result -> {
                 if (result == null) {
@@ -94,5 +93,12 @@ public class Anchor {
      */
     public Set<String> getAvailableTypes() {
         return new HashSet<>(repositories.keySet());
+    }
+
+    /**
+     * Get the DataPathResolver instance
+     */
+    public DataPathResolver getPathResolver() {
+        return pathResolver;
     }
 } 

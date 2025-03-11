@@ -149,7 +149,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public List<T> all() {
-        System.out.println("🔄 Getting all entities from cache");
         List<T> entities = getAllFromCache();
         
         if (entities != null && !entities.isEmpty()) {

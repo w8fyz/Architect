@@ -53,8 +53,10 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
     @Override
     public List<T> all() {
         try {
-            super.all();
-        } catch (Exception ignored) {}
-        return null;
+            return super.all();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
     }
 }
