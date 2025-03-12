@@ -41,12 +41,7 @@ test {
 }
 
 shadowJar {
-    relocate 'org.apache.commons.pool2', 'sh.fyz.architect.lib.commons.pool2'
-    relocate 'redis.clients', 'sh.fyz.architect.lib.redis'
-    relocate 'com.fasterxml.jackson', 'sh.fyz.architect.lib.jackson'
-    relocate 'org.reflections', 'sh.fyz.architect.lib.reflections'
-    relocate 'io.github.classgraph', 'sh.fyz.architect.lib.classgraph'
-    
+
     manifest {
         attributes(
             'Main-Class': 'sh.fyz.architect.Architect'
