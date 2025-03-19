@@ -11,6 +11,7 @@ import jakarta.persistence.EntityGraph;
 import java.lang.reflect.Field;
 import java.util.List;
 
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 import java.util.HashMap;
@@ -29,6 +30,31 @@ public class GenericRepository<T> {
         return type;
     }
 
+    public Object prepareEntityId(String value) {
+        try {
+            Field field = type.getDeclaredField("id");
+            Class<?> fieldType = field.getType();
+            if (fieldType == Long.class || fieldType == long.class) {
+                return Long.parseLong(value);
+            } else if (fieldType == UUID.class) {
+                return UUID.fromString(value);
+            } else if (fieldType == Integer.class || fieldType == int.class) {
+                return Integer.parseInt(value);
+            } else if (fieldType == String.class) {
+                return value;
+            } else if (fieldType == Double.class || fieldType == double.class) {
+                return Double.parseDouble(value);
+            } else if (fieldType == Float.class || fieldType == float.class) {
+                return Float.parseFloat(value);
+            } else if (fieldType == Boolean.class || fieldType == boolean.class) {
+                return Boolean.parseBoolean(value);
+            } else {
+                throw new IllegalArgumentException("Unsupported ID type: " + fieldType.getName());
+            }
+        } catch (NoSuchFieldException e) {
+            return value;
+        }
+    }
 
     public T save(T entity) {
         Session session = SessionManager.get().getSession();
