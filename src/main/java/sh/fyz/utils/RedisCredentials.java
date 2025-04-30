@@ -1,4 +1,4 @@
-package sh.fyz.architect.cache;
+package sh.fyz.utils;
 
 public class RedisCredentials {
 

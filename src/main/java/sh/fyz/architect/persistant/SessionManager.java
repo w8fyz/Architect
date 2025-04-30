@@ -17,13 +17,11 @@ import org.hibernate.cfg.Configuration;
 import org.hibernate.cfg.Environment;
 
 import jakarta.persistence.Entity;
+import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
 import java.lang.reflect.Field;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Properties;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -34,10 +32,10 @@ public class SessionManager {
     private static SessionManager instance;
     private SessionFactory sessionFactory;
 
-    private HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
+    private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
-    private SessionManager(SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    private SessionManager(ArrayList<Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
         try {
             if(authProvider != null) {
                 Properties settings = new Properties();
@@ -57,13 +55,13 @@ public class SessionManager {
                 settings.put("hibernate.hikari.idleTimeout", "30000");
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);
-
+                manualEntities.forEach(this::registerEntityClass);
                 Set<Class<?>> entityClasses = scanEntities();
                 for (Class<?> entityClass : entityClasses) {
                     System.out.println("Registering entity class: " + entityClass.getName());
-                    configuration.addAnnotatedClass(entityClass);
                     registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
                 }
+                addEntitiesToConfiguration(configuration);
 
                 this.sessionFactory = configuration.buildSessionFactory();
             }
@@ -79,9 +77,9 @@ public class SessionManager {
         return registeredEntityClasses.get(name);
     }
 
-    public static void initialize(SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    public static void initialize(ArrayList<Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize) {
         if (instance == null) {
-            instance = new SessionManager(authProvider, user, password, poolSize);
+            instance = new SessionManager(entityClasses, authProvider, user, password, poolSize);
         } else {
             throw new IllegalStateException("SessionManager is already initialized!");
         }
@@ -113,6 +111,18 @@ public class SessionManager {
             }
         } catch (InterruptedException e) {
             threadPool.shutdownNow();
+        }
+    }
+
+    public void registerEntityClass(Class<?> entityClass) {
+        System.out.println("Registering entity class: " + entityClass.getName()+" manually");
+        registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
+    }
+
+    private void addEntitiesToConfiguration(Configuration configuration) {
+        for (Class<?> entityClass : registeredEntityClasses.values()) {
+            System.out.println("Configuring entity class: " + entityClass.getName());
+            configuration.addAnnotatedClass(entityClass);
         }
     }
 

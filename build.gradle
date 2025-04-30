@@ -37,7 +37,7 @@ publishing {
         maven(MavenPublication) {
             groupId = "sh.fyz"
             artifactId = "architect"
-            version = "1.0.2"
+            version = "1.0.7"
 
             artifact shadowJar // Publish the fat jar instead of the normal jar
         }

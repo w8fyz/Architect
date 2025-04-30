@@ -1,7 +1,5 @@
 import sh.fyz.architect.Architect;
-import sh.fyz.architect.cache.RedisCredentials;
-import sh.fyz.architect.persistant.DatabaseCredentials;
-import sh.fyz.architect.persistant.sql.provider.PostgreSQLAuth;
+import sh.fyz.utils.RedisCredentials;
 
 import java.util.UUID;
 
