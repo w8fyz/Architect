@@ -10,6 +10,7 @@ import sh.fyz.architect.repositories.GenericRepository;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 
 public class Architect {
 
@@ -17,7 +18,7 @@ public class Architect {
     private DatabaseCredentials databaseCredentials;
     private boolean isReceiver = true;
     private final Anchor anchor;
-    private final ArrayList<Class<? extends IdentifiableEntity>> entityClasses = new ArrayList<>();
+    private final HashMap<ClassLoader, Class<? extends IdentifiableEntity>> entityClasses = new HashMap<>();
 
     public Architect() {
         this.anchor = Anchor.get();
@@ -50,14 +51,14 @@ public class Architect {
         return this;
     }
 
-    public Architect addEntityClass(Class<? extends IdentifiableEntity>... entityClasses) {
+    public Architect addEntityClass(ClassLoader classLoader, Class<? extends IdentifiableEntity> entityClasses) {
         if(entityClasses != null) {
-            this.entityClasses.addAll(Arrays.asList(entityClasses));
+            this.entityClasses.put(classLoader, entityClasses);
         }
         return this;
     }
 
-    public ArrayList<Class<? extends IdentifiableEntity>> getEntityClasses() {
+    public HashMap<ClassLoader, Class<? extends IdentifiableEntity>> getEntityClasses() {
         return entityClasses;
     }
 

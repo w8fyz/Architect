@@ -35,7 +35,7 @@ public class SessionManager {
     private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
-    private SessionManager(ArrayList<Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
         try {
             if(authProvider != null) {
                 Properties settings = new Properties();
@@ -61,9 +61,9 @@ public class SessionManager {
                     System.out.println("Registering entity class: " + entityClass.getName());
                     registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
                 }
-                addEntitiesToConfiguration(configuration);
 
-                this.sessionFactory = configuration.buildSessionFactory();
+
+                this.sessionFactory = addEntitiesToConfiguration(configuration).buildSessionFactory();
             }
             this.threadPool = Executors.newFixedThreadPool(poolSize);
         } catch (Exception e) {
@@ -77,7 +77,7 @@ public class SessionManager {
         return registeredEntityClasses.get(name);
     }
 
-    public static void initialize(ArrayList<Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    public static void initialize(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize) {
         if (instance == null) {
             instance = new SessionManager(entityClasses, authProvider, user, password, poolSize);
         } else {
@@ -114,16 +114,22 @@ public class SessionManager {
         }
     }
 
-    public void registerEntityClass(Class<?> entityClass) {
+    public void registerEntityClass(ClassLoader classLoader, Class<?> entityClass) {
         System.out.println("Registering entity class: " + entityClass.getName()+" manually");
+        try {
+            classLoader.loadClass(entityClass.getPackageName());
+        } catch (ClassNotFoundException e) {
+            e.printStackTrace();
+        }
         registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
     }
 
-    private void addEntitiesToConfiguration(Configuration configuration) {
+    private Configuration addEntitiesToConfiguration(Configuration configuration) {
         for (Class<?> entityClass : registeredEntityClasses.values()) {
             System.out.println("Configuring entity class: " + entityClass.getName());
             configuration.addAnnotatedClass(entityClass);
         }
+        return configuration;
     }
 
     private Set<Class<?>> scanEntities() {
