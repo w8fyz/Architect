@@ -4,10 +4,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import sh.fyz.architect.Architect;
 import sh.fyz.architect.anchor.lang.AnchorScript;
-import sh.fyz.architect.cache.RedisCredentials;
+import sh.fyz.utils.RedisCredentials;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.*;

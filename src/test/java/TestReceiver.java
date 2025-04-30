@@ -1,5 +1,5 @@
 import sh.fyz.architect.Architect;
-import sh.fyz.architect.cache.RedisCredentials;
+import sh.fyz.utils.RedisCredentials;
 import sh.fyz.architect.persistant.DatabaseCredentials;
 import sh.fyz.architect.persistant.sql.provider.PostgreSQLAuth;
 
@@ -9,7 +9,7 @@ public class TestReceiver {
     public static void main(String[] args) {
         Architect architect = new Architect().setReceiver(true)
                 .setDatabaseCredentials(new DatabaseCredentials(
-                        new PostgreSQLAuth("localhost", 5432, "architect"), "postgres", "", 6))
+                        new PostgreSQLAuth("localhost", 5432, "architect"), "postgres", "[REDACTED]", 6))
                 .setRedisCredentials(new RedisCredentials("localhost", "1234", 6379,100, 6));
         architect.start();
         architect.addRepositories(new UserRepository(), new RankRepository(), new FriendRepository());

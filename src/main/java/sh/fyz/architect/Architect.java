@@ -1,6 +1,6 @@
 package sh.fyz.architect;
 
-import sh.fyz.architect.cache.RedisCredentials;
+import sh.fyz.utils.RedisCredentials;
 import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistant.DatabaseCredentials;
@@ -10,7 +10,6 @@ import sh.fyz.architect.repositories.GenericRepository;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 public class Architect {
 
@@ -18,6 +17,7 @@ public class Architect {
     private DatabaseCredentials databaseCredentials;
     private boolean isReceiver = true;
     private final Anchor anchor;
+    private final ArrayList<Class<? extends IdentifiableEntity>> entityClasses = new ArrayList<>();
 
     public Architect() {
         this.anchor = Anchor.get();
@@ -50,6 +50,17 @@ public class Architect {
         return this;
     }
 
+    public Architect addEntityClass(Class<? extends IdentifiableEntity>... entityClasses) {
+        if(entityClasses != null) {
+            this.entityClasses.addAll(Arrays.asList(entityClasses));
+        }
+        return this;
+    }
+
+    public ArrayList<Class<? extends IdentifiableEntity>> getEntityClasses() {
+        return entityClasses;
+    }
+
     public void start() {
         System.out.println("Starting Architect!");
 
@@ -72,13 +83,14 @@ public class Architect {
                 System.out.println("/!\\ This instance will be used as a receiver /!\\");
             }
             SessionManager.initialize(
+                    entityClasses,
                 databaseCredentials.getSQLAuthProvider(),
                 databaseCredentials.getUser(), 
                 databaseCredentials.getPassword(), 
                 databaseCredentials.getPoolSize()
             );
         } else {
-            SessionManager.initialize(null, null, null, 1);
+            SessionManager.initialize(entityClasses, null, null, null, 1);
         }
     }
 
