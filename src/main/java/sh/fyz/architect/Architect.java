@@ -88,10 +88,11 @@ public class Architect {
                 databaseCredentials.getSQLAuthProvider(),
                 databaseCredentials.getUser(), 
                 databaseCredentials.getPassword(), 
-                databaseCredentials.getPoolSize()
+                databaseCredentials.getPoolSize(),
+                databaseCredentials.getThreadPoolSize()
             );
         } else {
-            SessionManager.initialize(entityClasses, null, null, null, 1);
+            SessionManager.initialize(entityClasses, null, null, null, 1, 10);
         }
     }
 

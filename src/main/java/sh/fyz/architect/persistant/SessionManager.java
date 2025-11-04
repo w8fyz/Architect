@@ -35,7 +35,7 @@ public class SessionManager {
     private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
-    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize, int threadPoolSize) {
         try {
             if(authProvider != null) {
                 Properties settings = new Properties();
@@ -51,10 +51,12 @@ public class SessionManager {
                 Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
                 int maxPool = Math.max(1, poolSize);
-                int minIdle = Math.max(1, maxPool / 2);
-                settings.put("hibernate.hikari.minimumIdle", String.valueOf(minIdle));
+                settings.put("hibernate.hikari.minimumIdle", String.valueOf(maxPool));
                 settings.put("hibernate.hikari.maximumPoolSize", String.valueOf(maxPool));
                 settings.put("hibernate.hikari.idleTimeout", "30000");
+                settings.put("hibernate.hikari.maxLifetime", "1800000");
+                settings.put("hibernate.hikari.connectionTimeout", "30000");
+                settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);
                 manualEntities.forEach(this::registerEntityClass);
@@ -67,7 +69,7 @@ public class SessionManager {
 
                 this.sessionFactory = addEntitiesToConfiguration(configuration).buildSessionFactory();
             }
-            this.threadPool = Executors.newFixedThreadPool(poolSize);
+            this.threadPool = Executors.newFixedThreadPool(threadPoolSize);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize Hibernate", e);
         }
@@ -79,9 +81,9 @@ public class SessionManager {
         return registeredEntityClasses.get(name);
     }
 
-    public static void initialize(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    public static void initialize(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize, int threadPoolSize) {
         if (instance == null) {
-            instance = new SessionManager(entityClasses, authProvider, user, password, poolSize);
+            instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, threadPoolSize);
         } else {
             throw new IllegalStateException("SessionManager is already initialized!");
         }
