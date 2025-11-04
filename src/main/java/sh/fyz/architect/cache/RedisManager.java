@@ -130,7 +130,7 @@ public class RedisManager {
                         }
                     }
                 }
-                cursor = scan.getCursor();
+                cursor = String.valueOf(scan.getCursor());
             } while (!"0".equals(cursor));
             return result;
         } catch (Exception e) {
