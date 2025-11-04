@@ -97,11 +97,6 @@ public class Architect {
 
     public void stop() {
         System.out.println("Stopping Architect!");
-        try {
-            Thread.sleep(3000);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
 
         if (redisCredentials != null) {
             System.out.println("Disconnecting from Redis at " + redisCredentials.getHost() + ":" + redisCredentials.getPort());

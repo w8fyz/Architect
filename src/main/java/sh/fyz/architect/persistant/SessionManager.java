@@ -50,8 +50,10 @@ public class SessionManager {
 
                 Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
-                settings.put("hibernate.hikari.minimumIdle", "5");
-                settings.put("hibernate.hikari.maximumPoolSize", "10");
+                int maxPool = Math.max(1, poolSize);
+                int minIdle = Math.max(1, maxPool / 2);
+                settings.put("hibernate.hikari.minimumIdle", String.valueOf(minIdle));
+                settings.put("hibernate.hikari.maximumPoolSize", String.valueOf(maxPool));
                 settings.put("hibernate.hikari.idleTimeout", "30000");
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);

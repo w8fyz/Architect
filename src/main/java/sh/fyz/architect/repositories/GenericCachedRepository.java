@@ -66,17 +66,14 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public T where(String fieldName, Object value) {
-        System.out.println("CACHE WHERE "+fieldName+" = "+value);
         List<T> entities = getAllFromCache();
         if (entities != null) {
             for (T entity : entities) {
                 try {
-                    // Résoudre les relations avant de comparer
                     entity = resolveRelations(entity);
                     Field field = entity.getClass().getDeclaredField(fieldName);
                     field.setAccessible(true);
                     Object fieldValue = field.get(entity);
-                    System.out.println("VALUE : "+value+" FIELD : "+fieldValue);
                     if (value.equals(fieldValue)) {
                         return entity;
                     }
@@ -152,8 +149,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         List<T> entities = getAllFromCache();
         
         if (entities != null && !entities.isEmpty()) {
-            System.out.println("✅ Found " + entities.size() + " entities in cache");
-            // Résoudre les relations pour chaque entité
             List<T> resolvedEntities = new ArrayList<>();
             for (T entity : entities) {
                 T resolvedEntity = resolveRelations(entity);
@@ -164,38 +159,36 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             return resolvedEntities;
         }
 
-        System.out.println("🔄 Cache miss, fetching from database");
         entities = super.all();
         if (entities != null && !entities.isEmpty()) {
-            System.out.println("✅ Found " + entities.size() + " entities in database");
             for (T entity : entities) {
                 RedisManager.get().save(cacheKeyPrefix + entity.getId(), entity);
             }
             return entities;
         } else {
-            System.out.println("⚠️ No entities found");
-            return new ArrayList<>(); // Retourner une liste vide plutôt que null
+            return new ArrayList<>();
         }
     }
 
     private T resolveRelations(T entity) {
         try {
-            System.out.println("🔄 Resolving relations for entity: " + entity.getClass().getSimpleName() + "#" + entity.getId());
+            java.util.HashMap<Class<?>, GenericRepository<?>> repoCache = new java.util.HashMap<>();
             for (Field field : entity.getClass().getDeclaredFields()) {
                 field.setAccessible(true);
                 if (field.isAnnotationPresent(OneToMany.class)) {
-                    System.out.println("   📑 Processing OneToMany field: " + field.getName());
                     Collection<?> ids = (Collection<?>) field.get(entity);
                     if (ids != null) {
                         Collection<Object> resolvedEntities = new ArrayList<>();
                         for (Object id : ids) {
                             String repositoryName = field.getType().getComponentType().getSimpleName().toLowerCase() + "s";
-                            GenericRepository<?> repository = Anchor.get().getRepository(repositoryName);
+                            GenericRepository<?> repository = repoCache.computeIfAbsent(
+                                    field.getType().getComponentType(),
+                                    k -> Anchor.get().getRepository(repositoryName)
+                            );
                             if (repository != null) {
                                 Object resolvedEntity = repository.findById(id);
                                 if (resolvedEntity != null) {
                                     resolvedEntities.add(resolvedEntity);
-                                    System.out.println("      ✅ Resolved entity: " + resolvedEntity);
                                 }
                             }
                         }
@@ -203,16 +196,17 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     }
                 } else if (field.isAnnotationPresent(ManyToOne.class) || 
                          field.isAnnotationPresent(OneToOne.class)) {
-                    System.out.println("   📑 Processing ManyToOne/OneToOne field: " + field.getName());
                     Object id = field.get(entity);
                     if (id != null) {
                         String repositoryName = field.getType().getSimpleName().toLowerCase() + "s";
-                        GenericRepository<?> repository = Anchor.get().getRepository(repositoryName);
+                        GenericRepository<?> repository = repoCache.computeIfAbsent(
+                                field.getType(),
+                                k -> Anchor.get().getRepository(repositoryName)
+                        );
                         if (repository != null) {
                             Object resolvedEntity = repository.findById(id);
                             if (resolvedEntity != null) {
                                 field.set(entity, resolvedEntity);
-                                System.out.println("      ✅ Resolved entity: " + resolvedEntity);
                             }
                         }
                     }
@@ -220,7 +214,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             }
             return entity;
         } catch (Exception e) {
-            System.out.println("❌ Error resolving relations: " + e.getMessage());
             e.printStackTrace();
             return null;
         }

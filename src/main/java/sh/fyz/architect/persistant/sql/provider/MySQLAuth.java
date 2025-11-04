@@ -20,7 +20,7 @@ public class MySQLAuth extends SQLAuthProvider {
 
     @Override
     public String getDriver() {
-        return "com.mysql.jdbc.Driver";
+        return "com.mysql.cj.jdbc.Driver";
     }
 
     @Override

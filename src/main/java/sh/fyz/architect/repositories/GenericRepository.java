@@ -57,22 +57,18 @@ public class GenericRepository<T> {
     }
 
     public T save(T entity) {
-        Session session = SessionManager.get().getSession();
-        Transaction transaction = session.beginTransaction();
-        T savedEntity;
-
-        try {
-            savedEntity = (T) session.merge(entity);
-            transaction.commit();
-        } catch (Exception e) {
-            transaction.rollback();
-            e.printStackTrace();
-            return entity;
-        } finally {
-            session.close();
+        try (Session session = SessionManager.get().getSession()) {
+            Transaction transaction = session.beginTransaction();
+            try {
+                T savedEntity = (T) session.merge(entity);
+                transaction.commit();
+                return savedEntity;
+            } catch (Exception e) {
+                transaction.rollback();
+                e.printStackTrace();
+                return entity;
+            }
         }
-
-        return savedEntity;
     }
 
     public void saveAsync(T entity, Consumer<T> callback, Consumer<Exception> errorCallback) {
@@ -88,10 +84,9 @@ public class GenericRepository<T> {
     }
 
     public T findById(Object id) {
-        Session session = SessionManager.get().getSession();
-        T entity = session.get(type, id);
-        session.close();
-        return entity;
+        try (Session session = SessionManager.get().getSession()) {
+            return session.get(type, id);
+        }
     }
 
     public void findByIdAsync(Long id, Consumer<T> callback, Consumer<Exception> errorCallback) {
@@ -106,10 +101,9 @@ public class GenericRepository<T> {
     }
 
     public List<T> all() {
-        Session session = SessionManager.get().getSession();
-        List<T> entities = session.createQuery("from " + type.getName(), type).list();
-        session.close();
-        return entities;
+        try (Session session = SessionManager.get().getSession()) {
+            return session.createQuery("from " + type.getName(), type).list();
+        }
     }
 
     public void allAsync(Consumer<List<T>> callback, Consumer<Exception> errorCallback) {
@@ -166,17 +160,15 @@ public class GenericRepository<T> {
     }
 
     public void delete(T entity) {
-        Session session = SessionManager.get().getSession();
-        Transaction transaction = session.beginTransaction();
-
-        try {
-            session.remove(entity);
-            transaction.commit();
-        } catch (Exception e) {
-            transaction.rollback();
-            e.printStackTrace();
-        } finally {
-            session.close();
+        try (Session session = SessionManager.get().getSession()) {
+            Transaction transaction = session.beginTransaction();
+            try {
+                session.remove(entity);
+                transaction.commit();
+            } catch (Exception e) {
+                transaction.rollback();
+                e.printStackTrace();
+            }
         }
     }
 

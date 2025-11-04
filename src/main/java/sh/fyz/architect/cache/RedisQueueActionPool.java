@@ -19,18 +19,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class RedisQueueActionPool {
 
-    private final ArrayList<GenericCachedRepository> queue = new ArrayList<>();
-    private final HashMap<DatabaseAction, GenericRepository> pubSubQueue = new HashMap<>();
+    private final java.util.concurrent.CopyOnWriteArrayList<GenericCachedRepository> queue = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.concurrent.ConcurrentLinkedQueue<java.util.AbstractMap.SimpleEntry<DatabaseAction, GenericRepository>> pubSubQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final ExecutorService threadPool;
     private volatile boolean running = true;
 
     public void add(GenericCachedRepository repository) {
         queue.add(repository);
-        repository.all(); // Load all entities from the database
+        repository.all();
     }
 
     public void add(DatabaseAction action, GenericRepository repository) {
-        pubSubQueue.put(action, repository);
+        pubSubQueue.add(new java.util.AbstractMap.SimpleEntry<>(action, repository));
     }
 
     public RedisQueueActionPool(boolean isReceiver) {
@@ -71,15 +71,12 @@ public class RedisQueueActionPool {
 
         threadPool.submit(() -> {
             while (RedisManager.get().isAlive()) {
-                Iterator<Map.Entry<DatabaseAction, GenericRepository>> iterator = pubSubQueue.entrySet().iterator();
-                while (iterator.hasNext()) {
-                    Map.Entry<DatabaseAction, GenericRepository> entry = iterator.next();
+                java.util.AbstractMap.SimpleEntry<DatabaseAction, GenericRepository> entry;
+                while ((entry = pubSubQueue.poll()) != null) {
                     DatabaseAction action = entry.getKey();
                     GenericRepository repository = entry.getValue();
-                    
                     try {
                         Object entity = convertMapToEntity(action.getEntity(), SessionManager.get().getEntityClass(action.getClassName()));
-
                         switch (action.getType()) {
                             case SAVE:
                                 repository.save(entity);
@@ -92,12 +89,12 @@ public class RedisQueueActionPool {
                         System.err.println("Error processing action: " + e.getMessage());
                         e.printStackTrace();
                     }
-                    iterator.remove();
                 }
                 try {
                     Thread.sleep(200);
                 } catch (InterruptedException ignored) {
-                    ignored.printStackTrace();
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
         });

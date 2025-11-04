@@ -107,19 +107,31 @@ public class RedisManager {
     public <T> List<T> findAll(String pattern, Class<T> type) {
         try (Jedis jedis = jedisPool.getResource()) {
             List<T> result = new ArrayList<>();
-            for (String key : jedis.keys(pattern)) {
-                String data = jedis.get(key);
-                if (data != null) {
-                    try {
-                        Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
-                        T entity = reconstructEntity(rawData, type);
-
-                        if (entity != null) {
-                            result.add(entity);
+            String cursor = ScanParams.SCAN_POINTER_START;
+            ScanParams params = new ScanParams().match(pattern).count(1000);
+            do {
+                ScanResult<String> scan = jedis.scan(cursor, params);
+                List<String> keys = scan.getResult();
+                if (!keys.isEmpty()) {
+                    Pipeline pipeline = jedis.pipelined();
+                    List<Response<String>> responses = new ArrayList<>(keys.size());
+                    for (String key : keys) {
+                        responses.add(pipeline.get(key));
+                    }
+                    pipeline.sync();
+                    for (Response<String> resp : responses) {
+                        String data = resp.get();
+                        if (data != null) {
+                            try {
+                                Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
+                                T entity = reconstructEntity(rawData, type);
+                                if (entity != null) result.add(entity);
+                            } catch (Exception ignored) {}
                         }
-                    } catch (Exception ignored) {}
+                    }
                 }
-            }
+                cursor = scan.getCursor();
+            } while (!"0".equals(cursor));
             return result;
         } catch (Exception e) {
             e.printStackTrace();
@@ -300,9 +312,15 @@ public class RedisManager {
     }
 
     public void shutdown() {
-        redisQueueActionPool.shutdown();
+        if (redisQueueActionPool != null) {
+            redisQueueActionPool.shutdown();
+        }
         jedisPool.close();
         isAlive = false;
+    }
+
+    public ObjectMapper getObjectMapper() {
+        return objectMapper;
     }
 }
 
