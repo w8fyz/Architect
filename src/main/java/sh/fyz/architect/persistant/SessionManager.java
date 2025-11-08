@@ -53,10 +53,20 @@ public class SessionManager {
                 int maxPool = Math.max(1, poolSize);
                 settings.put("hibernate.hikari.minimumIdle", String.valueOf(maxPool));
                 settings.put("hibernate.hikari.maximumPoolSize", String.valueOf(maxPool));
-                settings.put("hibernate.hikari.idleTimeout", "30000");
+                settings.put("hibernate.hikari.idleTimeout", "0");
                 settings.put("hibernate.hikari.maxLifetime", "1800000");
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
                 settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
+
+                settings.put("hibernate.jdbc.batch_size", "20");
+                settings.put("hibernate.order_inserts", "true");
+                settings.put("hibernate.order_updates", "true");
+
+                settings.put("hibernate.jdbc.fetch_size", "50");
+                settings.put("hibernate.default_batch_fetch_size", "16");
+
+                settings.put("hibernate.generate_statistics", "false");
+
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);
                 manualEntities.forEach(this::registerEntityClass);
