@@ -53,7 +53,7 @@ public class SessionManager {
                 int maxPool = Math.max(1, poolSize);
                 settings.put("hibernate.hikari.minimumIdle", String.valueOf(maxPool));
                 settings.put("hibernate.hikari.maximumPoolSize", String.valueOf(maxPool));
-                settings.put("hibernate.hikari.idleTimeout", "30000");
+                settings.put("hibernate.hikari.idleTimeout", "0");
                 settings.put("hibernate.hikari.maxLifetime", "1800000");
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
                 settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
