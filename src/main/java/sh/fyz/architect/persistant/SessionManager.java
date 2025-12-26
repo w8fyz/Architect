@@ -1,16 +1,6 @@
 package sh.fyz.architect.persistant;
 import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
-import jakarta.persistence.FetchType;
-import jakarta.persistence.ManyToMany;
-import jakarta.persistence.OneToMany;
-import javassist.ClassPool;
-import javassist.CtClass;
-import javassist.CtField;
-import javassist.bytecode.AnnotationsAttribute;
-import javassist.bytecode.ConstPool;
-import javassist.bytecode.annotation.Annotation;
-import javassist.bytecode.annotation.EnumMemberValue;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.cfg.Configuration;
@@ -20,7 +10,6 @@ import jakarta.persistence.Entity;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
-import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,6 +45,7 @@ public class SessionManager {
                 settings.put("hibernate.hikari.idleTimeout", "0");
                 settings.put("hibernate.hikari.maxLifetime", "1800000");
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
+                settings.put("hibernate.hikari.keepaliveTime", "300000");
                 settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
 
                 settings.put("hibernate.jdbc.batch_size", "20");
