@@ -24,7 +24,12 @@ public class SessionManager {
     private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
+    // For compatibility
     private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize, int threadPoolSize) {
+        this(manualEntities, authProvider, user, password, poolSize);
+    }
+
+    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
         try {
             if(authProvider != null) {
                 Properties settings = new Properties();
@@ -69,7 +74,7 @@ public class SessionManager {
 
                 this.sessionFactory = addEntitiesToConfiguration(configuration).buildSessionFactory();
             }
-            this.threadPool = Executors.newFixedThreadPool(threadPoolSize);
+            this.threadPool = Executors.newVirtualThreadPerTaskExecutor();
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize Hibernate", e);
         }

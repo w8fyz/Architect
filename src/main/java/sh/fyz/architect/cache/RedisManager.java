@@ -23,7 +23,7 @@ public class RedisManager {
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
 
-    private final ExecutorService pubSubExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService pubSubExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     private boolean isReceiver;
     private boolean isAlive = true;
