@@ -45,15 +45,15 @@ publishing {
 }
 
 dependencies {
-    implementation "org.hibernate.orm:hibernate-core:6.3.0.Final"
-    implementation "com.zaxxer:HikariCP:5.0.1"
+    implementation "org.hibernate.orm:hibernate-core:6.3.2.Final"
+    implementation "com.zaxxer:HikariCP:7.0.2"
     implementation "org.reflections:reflections:0.10.2"
-    implementation "jakarta.persistence:jakarta.persistence-api:3.1.0"
-    implementation 'redis.clients:jedis:2.8.0'
-    implementation 'org.apache.commons:commons-pool2:2.4.2'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
-    implementation 'io.github.classgraph:classgraph:4.8.161'
-    implementation 'org.postgresql:postgresql:42.7.2'
+    implementation "jakarta.persistence:jakarta.persistence-api:3.2.0"
+    implementation 'redis.clients:jedis:7.1.0'
+    implementation 'org.apache.commons:commons-pool2:2.13.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
+    implementation 'io.github.classgraph:classgraph:4.8.184'
+    implementation 'org.postgresql:postgresql:42.7.8'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.7.1'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

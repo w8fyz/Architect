@@ -6,15 +6,15 @@ import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
-import org.hibernate.Hibernate;
 import redis.clients.jedis.*;
+import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.resps.ScanResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 
 public class RedisManager {
 
@@ -34,7 +34,11 @@ public class RedisManager {
         config.setMaxIdle(maxConnections / 2);
         config.setMinIdle(1);
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
-        if (receiver) jedisPool.getResource().flushAll();
+        if (receiver) {
+            try (Jedis jedis = jedisPool.getResource()) {
+                jedis.flushAll();
+            }
+        }
         this.objectMapper = new ObjectMapper();
         this.isReceiver = receiver;
     }
@@ -113,24 +117,25 @@ public class RedisManager {
                 ScanResult<String> scan = jedis.scan(cursor, params);
                 List<String> keys = scan.getResult();
                 if (!keys.isEmpty()) {
-                    Pipeline pipeline = jedis.pipelined();
-                    List<Response<String>> responses = new ArrayList<>(keys.size());
-                    for (String key : keys) {
-                        responses.add(pipeline.get(key));
-                    }
-                    pipeline.sync();
-                    for (Response<String> resp : responses) {
-                        String data = resp.get();
-                        if (data != null) {
-                            try {
-                                Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
-                                T entity = reconstructEntity(rawData, type);
-                                if (entity != null) result.add(entity);
-                            } catch (Exception ignored) {}
+                    try (Pipeline pipeline = jedis.pipelined()) {
+                        List<Response<String>> responses = new ArrayList<>(keys.size());
+                        for (String key : keys) {
+                            responses.add(pipeline.get(key));
+                        }
+                        pipeline.sync();
+                        for (Response<String> resp : responses) {
+                            String data = resp.get();
+                            if (data != null) {
+                                try {
+                                    Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
+                                    T entity = reconstructEntity(rawData, type);
+                                    if (entity != null) result.add(entity);
+                                } catch (Exception ignored) {}
+                            }
                         }
                     }
                 }
-                cursor = String.valueOf(scan.getCursor());
+                cursor = scan.getCursor();
             } while (!"0".equals(cursor));
             return result;
         } catch (Exception e) {
