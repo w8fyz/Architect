@@ -1,65 +1,86 @@
 plugins {
-    id 'maven-publish'
-    id 'java'
-    id 'com.gradleup.shadow' version '9.4.1'
+    id 'java-library'
+    id "com.vanniktech.maven.publish" version "0.36.0"
 }
 
-group = 'fr.freshperf.architect'
+group = 'sh.fyz'
 version = '2.0.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.compilerArgs += ['-parameters']
-    options.release = 21
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.addStringOption('Xdoclint:none', '-quiet')
 }
 
 repositories {
     mavenCentral()
 }
 
-publishing {
-    publications {
-        maven(MavenPublication) {
-            groupId = "sh.fyz"
-            artifactId = "architect"
-            version = "2.0.0"
-            artifact shadowJar // Publish the fat jar instead of the normal jar
-        }
-    }
-}
-
 dependencies {
-    implementation "org.hibernate.orm:hibernate-core:6.6.23.Final"
+    api "org.hibernate.orm:hibernate-core:6.6.23.Final"
+    api "jakarta.persistence:jakarta.persistence-api:3.2.0"
+
     implementation "com.zaxxer:HikariCP:7.0.2"
     implementation "org.reflections:reflections:0.10.2"
-    implementation "jakarta.persistence:jakarta.persistence-api:3.2.0"
     implementation 'redis.clients:jedis:7.4.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.2'
     implementation 'io.github.classgraph:classgraph:4.8.184'
-    implementation 'org.postgresql:postgresql:42.7.10'
 
+    testImplementation 'org.postgresql:postgresql:42.7.10'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.14.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+mavenPublishing {
+    publishToMavenCentral()
+
+    pom {
+        name = 'Architect'
+        description = 'A lightweight Java ORM framework built on Hibernate with optional Redis caching and pub/sub relay.'
+        url = 'https://fyz.sh'
+        licenses {
+            license {
+                name = 'MIT License'
+                url = 'https://opensource.org/licenses/MIT'
+            }
+        }
+        developers {
+            developer {
+                id = "fyz"
+                name = "Thibeau Benet"
+                url = "https://github.com/w8fyz"
+            }
+        }
+        scm {
+            url = "https://github.com/fyz-sh/architect"
+            connection = "scm:git:git://github.com/fyz-sh/architect.git"
+            developerConnection = "scm:git:ssh://git@github.com/fyz-sh/architect.git"
+        }
+    }
+
+    signAllPublications()
+}
+
+signing {
+    useGpgCmd()
 }
 
 test {
     useJUnitPlatform()
     testLogging {
         showStandardStreams = true
-    }
-}
-
-shadowJar {
-
-    manifest {
-        attributes(
-            'Main-Class': 'sh.fyz.architect.Architect'
-        )
     }
 }

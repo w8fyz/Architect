@@ -187,8 +187,22 @@ architect.setRedisCredentials(new RedisCredentials(host, password, port, timeout
 - Always call `architect.stop()` on shutdown.
 - `GenericCachedRepository.save()` on a new entity (id=null) is only allowed on receiver instances.
 
-## Testing
+## Installation
 
-Tests use JUnit 5 with a PostgreSQL service. CI workflow at `.github/workflows/tests.yml` launches Postgres and runs `./gradlew test`.
+### Gradle
 
-For full API details, see [README.md](../../../README.md).
+```groovy
+dependencies {
+    implementation 'sh.fyz:architect:2.0.0'
+}
+```
+
+### Maven
+
+```xml
+<dependency>
+    <groupId>sh.fyz</groupId>
+    <artifactId>architect</artifactId>
+    <version>2.0.0</version>
+</dependency>
+```
