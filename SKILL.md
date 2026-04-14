@@ -193,7 +193,7 @@ architect.setRedisCredentials(new RedisCredentials(host, password, port, timeout
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:architect:2.0.0'
+    implementation 'sh.fyz:Architect:2.0.0'
 }
 ```
 
@@ -202,7 +202,7 @@ dependencies {
 ```xml
 <dependency>
     <groupId>sh.fyz</groupId>
-    <artifactId>architect</artifactId>
+    <artifactId>Architect</artifactId>
     <version>2.0.0</version>
 </dependency>
 ```
