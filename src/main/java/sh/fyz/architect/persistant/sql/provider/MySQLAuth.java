@@ -4,10 +4,14 @@ import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
 public class MySQLAuth extends SQLAuthProvider {
 
-    private String hostname, database;
-    private int port;
+    private final String hostname;
+    private final String database;
+    private final int port;
 
     public MySQLAuth(String hostname, int port, String database) {
+        validateHost(hostname);
+        validatePort(port);
+        validateDatabase(database);
         this.hostname = hostname;
         this.port = port;
         this.database = database;

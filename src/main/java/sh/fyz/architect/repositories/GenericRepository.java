@@ -3,23 +3,22 @@ package sh.fyz.architect.repositories;
 import sh.fyz.architect.persistant.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
-import org.hibernate.graph.GraphSemantic;
-
-import jakarta.persistence.OneToMany;
-import jakarta.persistence.EntityGraph;
+import org.hibernate.query.Query;
 
 import java.lang.reflect.Field;
 import java.util.List;
-
+import java.util.Set;
+import java.util.StringJoiner;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
-import java.util.HashMap;
-import java.util.Map;
 
 public class GenericRepository<T> {
     protected final Class<T> type;
     protected final ExecutorService threadPool;
+
+    private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
@@ -29,6 +28,42 @@ public class GenericRepository<T> {
     public Class<T> getEntityClass() {
         return type;
     }
+
+    // --- QUERY BUILDER ENTRY POINT ---
+
+    public QueryBuilder<T> query() {
+        return new QueryBuilder<>(this);
+    }
+
+    // --- FIELD VALIDATION ---
+
+    protected Set<String> getValidFieldNames() {
+        return VALID_FIELDS_CACHE.computeIfAbsent(type, clazz -> {
+            Set<String> names = ConcurrentHashMap.newKeySet();
+            Class<?> current = clazz;
+            while (current != null && current != Object.class) {
+                for (Field f : current.getDeclaredFields()) {
+                    names.add(f.getName());
+                }
+                current = current.getSuperclass();
+            }
+            return names;
+        });
+    }
+
+    protected void validateFieldName(String fieldName) {
+        if (fieldName == null || fieldName.isEmpty()) {
+            throw new IllegalArgumentException("Field name must not be null or empty");
+        }
+        if (!getValidFieldNames().contains(fieldName)) {
+            throw new IllegalArgumentException(
+                "Invalid field name '" + fieldName + "' for entity " + type.getSimpleName() +
+                ". Valid fields: " + getValidFieldNames()
+            );
+        }
+    }
+
+    // --- ID PREPARATION ---
 
     public Object prepareEntityId(String value) {
         try {
@@ -56,17 +91,19 @@ public class GenericRepository<T> {
         }
     }
 
+    // --- CRUD OPERATIONS ---
+
     public T save(T entity) {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
+                @SuppressWarnings("unchecked")
                 T savedEntity = (T) session.merge(entity);
                 transaction.commit();
                 return savedEntity;
             } catch (Exception e) {
                 transaction.rollback();
-                e.printStackTrace();
-                return entity;
+                throw new RuntimeException("Failed to save entity: " + e.getMessage(), e);
             }
         }
     }
@@ -77,7 +114,6 @@ public class GenericRepository<T> {
                 T savedEntity = save(entity);
                 callback.accept(savedEntity);
             } catch (Exception e) {
-                e.printStackTrace();
                 errorCallback.accept(e);
             }
         });
@@ -89,7 +125,7 @@ public class GenericRepository<T> {
         }
     }
 
-    public void findByIdAsync(Long id, Consumer<T> callback, Consumer<Exception> errorCallback) {
+    public void findByIdAsync(Object id, Consumer<T> callback, Consumer<Exception> errorCallback) {
         threadPool.submit(() -> {
             try {
                 T entity = findById(id);
@@ -117,48 +153,6 @@ public class GenericRepository<T> {
         });
     }
 
-    public T where(String where, Object param) {
-        try (Session session = SessionManager.get().getSession()) {
-            String hql = "FROM " + type.getName() + " WHERE " + where + " = :param";
-            List<T> entities = session.createQuery(hql, type)
-                    .setParameter("param", param)
-                    .setMaxResults(1)
-                    .list();
-            return entities.stream().findFirst().orElse(null);
-        }
-    }
-
-    public void whereAsync(String where, String param, Consumer<T> callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
-            try {
-                T entity = where(where, param);
-                callback.accept(entity);
-            } catch (Exception e) {
-                errorCallback.accept(e);
-            }
-        });
-    }
-
-    public List<T> whereList(String where, String param) {
-        try (Session session = SessionManager.get().getSession()) {
-            String hql = "FROM " + type.getName() + " WHERE " + where + " = :param";
-            return session.createQuery(hql, type)
-                    .setParameter("param", param)
-                    .list();
-        }
-    }
-
-    public void whereListAsync(String where, String param, Consumer<List<T>> callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
-            try {
-                List<T> entities = whereList(where, param);
-                callback.accept(entities);
-            } catch (Exception e) {
-                errorCallback.accept(e);
-            }
-        });
-    }
-
     public void delete(T entity) {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
@@ -167,12 +161,11 @@ public class GenericRepository<T> {
                 transaction.commit();
             } catch (Exception e) {
                 transaction.rollback();
-                e.printStackTrace();
+                throw new RuntimeException("Failed to delete entity: " + e.getMessage(), e);
             }
         }
     }
 
-    // Asynchronous delete by entity
     public void deleteAsync(T entity, Runnable callback, Consumer<Exception> errorCallback) {
         threadPool.submit(() -> {
             try {
@@ -184,28 +177,147 @@ public class GenericRepository<T> {
         });
     }
 
-    // Synchronous delete with WHERE clause
-    public void deleteWhere(String where, String param) {
+    // --- QUERY BUILDER EXECUTION (overridable by subclasses) ---
+
+    protected List<T> executeQuery(QueryBuilder<T> builder) {
+        validateQueryFields(builder);
+
         try (Session session = SessionManager.get().getSession()) {
-            Transaction transaction = session.beginTransaction();
-            String hql = "DELETE FROM " + type.getName() + " WHERE " + where + " = :param";
-            session.createQuery(hql, type)
-                    .setParameter("param", param)
-                    .executeUpdate();
-            transaction.commit();
+            String hql = buildSelectHql(builder);
+            Query<T> query = session.createQuery(hql, type);
+            bindParameters(query, builder);
+
+            if (builder.getLimit() > 0) {
+                query.setMaxResults(builder.getLimit());
+            }
+            if (builder.getOffset() > 0) {
+                query.setFirstResult(builder.getOffset());
+            }
+
+            return query.list();
         }
     }
 
-    // Asynchronous delete with WHERE clause
-    public void deleteWhereAsync(String where, String param, Runnable callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
+    protected long executeCount(QueryBuilder<T> builder) {
+        validateQueryFields(builder);
+
+        try (Session session = SessionManager.get().getSession()) {
+            String hql = buildCountHql(builder);
+            Query<Long> query = session.createQuery(hql, Long.class);
+            bindParameters(query, builder);
+            Long result = query.uniqueResult();
+            return result != null ? result : 0;
+        }
+    }
+
+    protected int executeDelete(QueryBuilder<T> builder) {
+        validateQueryFields(builder);
+
+        if (builder.getConditions().isEmpty()) {
+            throw new IllegalStateException("Cannot execute delete without conditions. Use deleteAll() or add at least one where clause.");
+        }
+
+        try (Session session = SessionManager.get().getSession()) {
+            Transaction transaction = session.beginTransaction();
             try {
-                deleteWhere(where, param);
-                callback.run();
+                String hql = buildDeleteHql(builder);
+                var query = session.createMutationQuery(hql);
+                bindParameters(query, builder);
+                int deleted = query.executeUpdate();
+                transaction.commit();
+                return deleted;
             } catch (Exception e) {
-                errorCallback.accept(e);
+                transaction.rollback();
+                throw new RuntimeException("Failed to execute delete query: " + e.getMessage(), e);
             }
-        });
+        }
+    }
+
+    // --- HQL BUILDING ---
+
+    private String buildWhereClause(QueryBuilder<T> builder) {
+        List<QueryBuilder.Condition> conditions = builder.getConditions();
+        List<QueryBuilder.RawCondition> rawConditions = builder.getRawConditions();
+
+        if (conditions.isEmpty() && rawConditions.isEmpty()) return "";
+
+        StringBuilder where = new StringBuilder(" WHERE ");
+        int clauseIndex = 0;
+
+        for (int i = 0; i < conditions.size(); i++) {
+            if (clauseIndex > 0) where.append(" AND ");
+            QueryBuilder.Condition c = conditions.get(i);
+            String param = "p" + i;
+            where.append(switch (c.operator()) {
+                case EQ -> c.field() + " = :" + param;
+                case NEQ -> c.field() + " <> :" + param;
+                case GT -> c.field() + " > :" + param;
+                case GTE -> c.field() + " >= :" + param;
+                case LT -> c.field() + " < :" + param;
+                case LTE -> c.field() + " <= :" + param;
+                case LIKE -> c.field() + " LIKE :" + param;
+                case IN -> c.field() + " IN (:" + param + ")";
+                case NOT_IN -> c.field() + " NOT IN (:" + param + ")";
+                case IS_NULL -> c.field() + " IS NULL";
+                case IS_NOT_NULL -> c.field() + " IS NOT NULL";
+            });
+            clauseIndex++;
+        }
+
+        for (QueryBuilder.RawCondition raw : rawConditions) {
+            if (clauseIndex > 0) where.append(" AND ");
+            where.append("(").append(raw.hqlFragment()).append(")");
+            clauseIndex++;
+        }
+
+        return where.toString();
+    }
+
+    private String buildOrderByClause(QueryBuilder<T> builder) {
+        List<QueryBuilder.OrderBy> orderBys = builder.getOrderBys();
+        if (orderBys.isEmpty()) return "";
+
+        StringJoiner joiner = new StringJoiner(", ", " ORDER BY ", "");
+        for (QueryBuilder.OrderBy o : orderBys) {
+            joiner.add(o.field() + " " + o.order().name());
+        }
+        return joiner.toString();
+    }
+
+    private String buildSelectHql(QueryBuilder<T> builder) {
+        return "FROM " + type.getName() + buildWhereClause(builder) + buildOrderByClause(builder);
+    }
+
+    private String buildCountHql(QueryBuilder<T> builder) {
+        return "SELECT COUNT(*) FROM " + type.getName() + buildWhereClause(builder);
+    }
+
+    private String buildDeleteHql(QueryBuilder<T> builder) {
+        return "DELETE FROM " + type.getName() + buildWhereClause(builder);
+    }
+
+    private void bindParameters(org.hibernate.query.CommonQueryContract query, QueryBuilder<T> builder) {
+        List<QueryBuilder.Condition> conditions = builder.getConditions();
+        for (int i = 0; i < conditions.size(); i++) {
+            QueryBuilder.Condition c = conditions.get(i);
+            if (c.operator() != QueryBuilder.Operator.IS_NULL && c.operator() != QueryBuilder.Operator.IS_NOT_NULL) {
+                query.setParameter("p" + i, c.value());
+            }
+        }
+
+        for (QueryBuilder.RawCondition raw : builder.getRawConditions()) {
+            for (var entry : raw.parameters().entrySet()) {
+                query.setParameter(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    private void validateQueryFields(QueryBuilder<T> builder) {
+        for (QueryBuilder.Condition c : builder.getConditions()) {
+            validateFieldName(c.field());
+        }
+        for (QueryBuilder.OrderBy o : builder.getOrderBys()) {
+            validateFieldName(o.field());
+        }
     }
 }
-

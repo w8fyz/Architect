@@ -4,7 +4,7 @@ public class DatabaseAction<T> {
 
     private T entity;
     private String className;
-    private int type;
+    private Type type;
 
     public DatabaseAction(T entity) {
         this.entity = entity;
@@ -14,8 +14,7 @@ public class DatabaseAction<T> {
     public DatabaseAction() {
     }
 
-
-    public DatabaseAction(T entity, int type) {
+    public DatabaseAction(T entity, Type type) {
         this.entity = entity;
         this.className = entity.getClass().getSimpleName();
         this.type = type;
@@ -28,14 +27,14 @@ public class DatabaseAction<T> {
     public String getClassName() {
         return className;
     }
-    public int getType() {
+
+    public Type getType() {
         return type;
     }
 
-    public interface Type {
-        public static final int SAVE = 1;
-        public static final int DELETE = 3;
-        public static final int NONE = 0;
+    public enum Type {
+        NONE,
+        SAVE,
+        DELETE
     }
-
 }

@@ -13,20 +13,26 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.Field;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class RedisManager {
 
+    private static volatile RedisManager instance;
+    private static final Object LOCK = new Object();
+
     private RedisQueueActionPool redisQueueActionPool;
-    private static RedisManager instance;
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
-
     private final ExecutorService pubSubExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
-    private boolean isReceiver;
-    private boolean isAlive = true;
+    private static final ConcurrentHashMap<Class<?>, Map<String, Field>> FIELD_CACHE = new ConcurrentHashMap<>();
+
+    private final boolean isReceiver;
+    private volatile boolean isAlive = true;
+    private final String keyPrefix;
 
     private RedisManager(String host, String password, int port, int timeout, int maxConnections, boolean receiver) {
         JedisPoolConfig config = new JedisPoolConfig();
@@ -34,13 +40,27 @@ public class RedisManager {
         config.setMaxIdle(maxConnections / 2);
         config.setMinIdle(1);
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
+        this.keyPrefix = "architect:";
         if (receiver) {
-            try (Jedis jedis = jedisPool.getResource()) {
-                jedis.flushAll();
-            }
+            clearArchitectKeys();
         }
         this.objectMapper = new ObjectMapper();
         this.isReceiver = receiver;
+    }
+
+    private void clearArchitectKeys() {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String cursor = ScanParams.SCAN_POINTER_START;
+            ScanParams params = new ScanParams().match(keyPrefix + "*").count(1000);
+            do {
+                ScanResult<String> scan = jedis.scan(cursor, params);
+                List<String> keys = scan.getResult();
+                if (!keys.isEmpty()) {
+                    jedis.del(keys.toArray(new String[0]));
+                }
+                cursor = scan.getCursor();
+            } while (!"0".equals(cursor));
+        }
     }
 
     private void createRedisPool() {
@@ -59,17 +79,18 @@ public class RedisManager {
         return pubSubExecutor;
     }
 
-
     public RedisQueueActionPool getRedisQueueActionPool() {
         return redisQueueActionPool;
     }
 
     public static void initialize(String host, String password, int port, int timeout, int maxConnections, boolean receiver) {
-        if (instance == null) {
-            instance = new RedisManager(host, password, port, timeout, maxConnections, receiver);
-            instance.createRedisPool();
-        } else {
-            throw new IllegalStateException("RedisManager is already initialized!");
+        synchronized (LOCK) {
+            if (instance == null) {
+                instance = new RedisManager(host, password, port, timeout, maxConnections, receiver);
+                instance.createRedisPool();
+            } else {
+                throw new IllegalStateException("RedisManager is already initialized!");
+            }
         }
     }
 
@@ -78,33 +99,32 @@ public class RedisManager {
     }
 
     public static RedisManager get() {
-        if (instance == null) {
+        RedisManager local = instance;
+        if (local == null) {
             throw new IllegalStateException("RedisManager is not initialized! Call initialize() first.");
         }
-        return instance;
+        return local;
     }
-
 
     public <T> void save(String key, T entity) {
         try (Jedis jedis = jedisPool.getResource()) {
             Map<String, Object> processedEntity = prepareForSave(entity);
-            jedis.set(key, objectMapper.writeValueAsString(processedEntity));
+            jedis.set(keyPrefix + key, objectMapper.writeValueAsString(processedEntity));
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("Failed to save entity to Redis: " + e.getMessage(), e);
         }
     }
 
     public <T> T find(String key, Class<T> type) {
         try (Jedis jedis = jedisPool.getResource()) {
-            String data = jedis.get(key);
+            String data = jedis.get(keyPrefix + key);
             if (data != null) {
                 Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
                 return reconstructEntity(rawData, type);
             }
             return null;
         } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            throw new RuntimeException("Failed to find entity in Redis: " + e.getMessage(), e);
         }
     }
 
@@ -112,7 +132,7 @@ public class RedisManager {
         try (Jedis jedis = jedisPool.getResource()) {
             List<T> result = new ArrayList<>();
             String cursor = ScanParams.SCAN_POINTER_START;
-            ScanParams params = new ScanParams().match(pattern).count(1000);
+            ScanParams params = new ScanParams().match(keyPrefix + pattern).count(1000);
             do {
                 ScanResult<String> scan = jedis.scan(cursor, params);
                 List<String> keys = scan.getResult();
@@ -130,7 +150,9 @@ public class RedisManager {
                                     Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
                                     T entity = reconstructEntity(rawData, type);
                                     if (entity != null) result.add(entity);
-                                } catch (Exception ignored) {}
+                                } catch (Exception e) {
+                                    System.err.println("WARN: Failed to deserialize cached entity: " + e.getMessage());
+                                }
                             }
                         }
                     }
@@ -139,43 +161,54 @@ public class RedisManager {
             } while (!"0".equals(cursor));
             return result;
         } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            throw new RuntimeException("Failed to find all entities in Redis: " + e.getMessage(), e);
         }
     }
 
     public void delete(String key) {
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.del(key);
+            jedis.del(keyPrefix + key);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("Failed to delete key from Redis: " + e.getMessage(), e);
         }
+    }
+
+    private Map<String, Field> getCachedFields(Class<?> clazz) {
+        return FIELD_CACHE.computeIfAbsent(clazz, c -> {
+            Map<String, Field> fieldMap = new LinkedHashMap<>();
+            Class<?> current = c;
+            while (current != null && current != Object.class) {
+                for (Field field : current.getDeclaredFields()) {
+                    field.setAccessible(true);
+                    fieldMap.putIfAbsent(field.getName(), field);
+                }
+                current = current.getSuperclass();
+            }
+            return Collections.unmodifiableMap(fieldMap);
+        });
     }
 
     private <T> Map<String, Object> prepareForSave(T entity) throws IllegalAccessException {
         Map<String, Object> jsonMap = new HashMap<>();
+        Map<String, Field> fields = getCachedFields(entity.getClass());
 
-        for (Field field : entity.getClass().getDeclaredFields()) {
-            field.setAccessible(true);
+        for (Map.Entry<String, Field> entry : fields.entrySet()) {
+            Field field = entry.getValue();
             Object value = field.get(entity);
 
             if (value != null) {
                 if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
-                    // Store the ID of the related entity
                     Field idField = getIdField(value.getClass());
                     if (idField != null) {
-                        idField.setAccessible(true);
                         jsonMap.put(field.getName() + "_id", idField.get(value));
                     }
-                } 
-                else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
+                } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     if (value instanceof Collection) {
                         List<Object> ids = new ArrayList<>();
                         for (Object item : (Collection<?>) value) {
                             if (item != null) {
                                 Field idField = getIdField(item.getClass());
                                 if (idField != null) {
-                                    idField.setAccessible(true);
                                     ids.add(idField.get(item));
                                 }
                             }
@@ -184,8 +217,7 @@ public class RedisManager {
                             jsonMap.put(field.getName() + "_ids", ids);
                         }
                     }
-                } 
-                else {
+                } else {
                     jsonMap.put(field.getName(), value);
                 }
             }
@@ -196,38 +228,32 @@ public class RedisManager {
     private <T> T reconstructEntity(Map<String, Object> rawData, Class<T> type) {
         try {
             T entity = type.getDeclaredConstructor().newInstance();
+            Map<String, Field> fields = getCachedFields(type);
 
-            for (Field field : type.getDeclaredFields()) {
-                field.setAccessible(true);
+            for (Map.Entry<String, Field> entry : fields.entrySet()) {
+                Field field = entry.getValue();
                 String fieldName = field.getName();
 
                 if (rawData.containsKey(fieldName)) {
                     Object value = rawData.get(fieldName);
-                    // Convert value if necessary
                     value = convertValue(value, field.getType());
                     field.set(entity, value);
-                } 
-                // Handle relationships
-                else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
+                } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
                     if (idValue != null) {
                         Object relatedEntity = find(field.getType().getSimpleName() + ":" + idValue, field.getType());
                         field.set(entity, relatedEntity);
                     }
-                }
-                else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
+                } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     List<?> ids = (List<?>) rawData.get(fieldName + "_ids");
                     if (ids != null && !ids.isEmpty()) {
                         Collection<Object> relatedEntities;
-                        
-                        // Create appropriate collection type
                         if (List.class.isAssignableFrom(field.getType())) {
                             relatedEntities = new ArrayList<>();
                         } else {
                             relatedEntities = new HashSet<>();
                         }
 
-                        // Get the generic type of the collection
                         Class<?> genericType = getGenericType(field);
                         if (genericType != null) {
                             for (Object idValue : ids) {
@@ -243,8 +269,7 @@ public class RedisManager {
             }
             return entity;
         } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            throw new RuntimeException("Failed to reconstruct entity of type " + type.getSimpleName() + ": " + e.getMessage(), e);
         }
     }
 
@@ -255,7 +280,9 @@ public class RedisManager {
                 String genericTypeName = typeName.substring(typeName.indexOf("<") + 1, typeName.indexOf(">"));
                 return Class.forName(genericTypeName);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            System.err.println("WARN: Failed to resolve generic type for field " + field.getName() + ": " + e.getMessage());
+        }
         return null;
     }
 
@@ -265,7 +292,7 @@ public class RedisManager {
         }
 
         if (targetType.isAssignableFrom(value.getClass())) {
-            return value; // No conversion needed
+            return value;
         }
 
         if (targetType == Long.class || targetType == long.class) {
@@ -293,14 +320,9 @@ public class RedisManager {
         return value;
     }
 
-
-
-    private boolean isEntity(Class<?> clazz) {
-        return getIdField(clazz) != null;
-    }
-
     private Field getIdField(Class<?> clazz) {
-        for (Field field : clazz.getDeclaredFields()) {
+        Map<String, Field> fields = getCachedFields(clazz);
+        for (Field field : fields.values()) {
             if (field.isAnnotationPresent(Id.class)) {
                 return field;
             }
@@ -310,22 +332,30 @@ public class RedisManager {
 
     public void setTTL(String key, int seconds) {
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.expire(key, seconds);
+            jedis.expire(keyPrefix + key, seconds);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("Failed to set TTL on key: " + e.getMessage(), e);
         }
     }
 
     public void shutdown() {
+        isAlive = false;
         if (redisQueueActionPool != null) {
             redisQueueActionPool.shutdown();
         }
+        pubSubExecutor.shutdown();
+        try {
+            if (!pubSubExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                pubSubExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            pubSubExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         jedisPool.close();
-        isAlive = false;
     }
 
     public ObjectMapper getObjectMapper() {
         return objectMapper;
     }
 }
-

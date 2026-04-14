@@ -4,9 +4,10 @@ import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
 public class SQLiteAuth extends SQLAuthProvider {
 
-    private String databasePath;
+    private final String databasePath;
 
     public SQLiteAuth(String databasePath) {
+        validateDatabase(databasePath);
         this.databasePath = databasePath;
     }
 

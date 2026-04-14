@@ -4,10 +4,14 @@ import sh.fyz.architect.persistant.sql.SQLAuthProvider;
 
 public class PostgreSQLAuth extends SQLAuthProvider {
 
-    private String hostname,database;
-    private int port;
+    private final String hostname;
+    private final String database;
+    private final int port;
 
     public PostgreSQLAuth(String hostname, int port, String database) {
+        validateHost(hostname);
+        validatePort(port);
+        validateDatabase(database);
         this.database = database;
         this.hostname = hostname;
         this.port = port;
@@ -25,6 +29,6 @@ public class PostgreSQLAuth extends SQLAuthProvider {
 
     @Override
     public String getUrl() {
-        return "jdbc:postgresql://"+hostname+":"+port+"/"+database;
+        return "jdbc:postgresql://" + hostname + ":" + port + "/" + database;
     }
 }

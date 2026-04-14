@@ -1,9 +1,12 @@
-package sh.fyz.utils;
+package sh.fyz.architect.cache;
 
 public class RedisCredentials {
 
-    String host,password;
-    int port, timeout, maxConnections;
+    private final String host;
+    private final String password;
+    private final int port;
+    private final int timeout;
+    private final int maxConnections;
 
     public RedisCredentials(String host, String password, int port, int timeout, int maxConnections) {
         this.host = host;

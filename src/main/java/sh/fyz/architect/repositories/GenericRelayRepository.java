@@ -4,8 +4,8 @@ import sh.fyz.architect.cache.EntityChannelPubSub;
 import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
-import java.util.List;
 
+import java.util.List;
 
 public class GenericRelayRepository<T extends IdentifiableEntity> extends GenericCachedRepository<T> {
 
@@ -14,22 +14,19 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
     public GenericRelayRepository(Class<T> type) {
         super(type);
         try {
-            channelPubSub = new EntityChannelPubSub<>(new DatabaseAction<T>(type.getDeclaredConstructor().newInstance()));
+            channelPubSub = new EntityChannelPubSub<>(type);
             channelPubSub.subscribe();
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("Failed to initialize relay repository for " + type.getSimpleName(), e);
         }
     }
 
     @Override
     public T save(T entity) {
-        if(!RedisManager.get().isReceiver()) channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
-        try {
-            return super.save(entity);
-        } catch (Exception e) {
-            e.printStackTrace();
+        if (!RedisManager.get().isReceiver()) {
+            channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
         }
-        return entity;
+        return super.save(entity);
     }
 
     @Override
@@ -37,17 +34,17 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
         try {
             return super.findById(id);
         } catch (Exception e) {
+            System.err.println("WARN: Failed to find entity by ID in relay repository: " + e.getMessage());
             return null;
         }
     }
+
     @Override
     public void delete(T entity) {
-        if(!RedisManager.get().isReceiver()) channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
-        try {
-            super.delete(entity);
-        } catch (Exception e) {
-            e.printStackTrace();
+        if (!RedisManager.get().isReceiver()) {
+            channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
         }
+        super.delete(entity);
     }
 
     @Override
@@ -55,8 +52,8 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
         try {
             return super.all();
         } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            System.err.println("WARN: Failed to list all entities in relay repository: " + e.getMessage());
+            return List.of();
         }
     }
 }

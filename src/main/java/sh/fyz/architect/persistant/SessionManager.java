@@ -1,4 +1,5 @@
 package sh.fyz.architect.persistant;
+
 import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
 import org.hibernate.Session;
@@ -18,36 +19,41 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class SessionManager {
-    private static SessionManager instance;
-    private SessionFactory sessionFactory;
+    private static volatile SessionManager instance;
+    private static final Object LOCK = new Object();
 
+    private SessionFactory sessionFactory;
     private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
     private final ExecutorService threadPool;
 
-    // For compatibility
-    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize, int threadPoolSize) {
-        this(manualEntities, authProvider, user, password, poolSize);
-    }
-
-    private SessionManager(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> manualEntities, SQLAuthProvider authProvider, String user, String password, int poolSize) {
+    private SessionManager(
+            List<Class<? extends IdentifiableEntity>> manualEntities,
+            SQLAuthProvider authProvider,
+            String user,
+            String password,
+            int poolSize,
+            int threadPoolSize,
+            String hbm2ddlAuto
+    ) {
         try {
-            if(authProvider != null) {
+            if (authProvider != null) {
                 Properties settings = new Properties();
                 settings.put(Environment.DRIVER, authProvider.getDriver());
                 settings.put(Environment.URL, authProvider.getUrl());
                 settings.put(Environment.USER, user);
                 settings.put(Environment.PASS, password);
                 settings.put(Environment.DIALECT, authProvider.getDialect());
-                settings.put(Environment.HBM2DDL_AUTO, "update");
+                settings.put(Environment.HBM2DDL_AUTO, hbm2ddlAuto != null ? hbm2ddlAuto : "update");
                 settings.put(Environment.SHOW_SQL, "false");
                 settings.put(Environment.GLOBALLY_QUOTED_IDENTIFIERS, "true");
 
                 Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
 
                 int maxPool = Math.max(1, poolSize);
-                settings.put("hibernate.hikari.minimumIdle", String.valueOf(maxPool));
+                int minIdle = Math.max(1, maxPool / 4);
+                settings.put("hibernate.hikari.minimumIdle", String.valueOf(minIdle));
                 settings.put("hibernate.hikari.maximumPoolSize", String.valueOf(maxPool));
-                settings.put("hibernate.hikari.idleTimeout", "0");
+                settings.put("hibernate.hikari.idleTimeout", "600000");
                 settings.put("hibernate.hikari.maxLifetime", "1800000");
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
                 settings.put("hibernate.hikari.keepaliveTime", "300000");
@@ -64,13 +70,24 @@ public class SessionManager {
 
                 Configuration configuration = new Configuration();
                 configuration.setProperties(settings);
-                manualEntities.forEach(this::registerEntityClass);
-                Set<Class<?>> entityClasses = scanEntities();
-                for (Class<?> entityClass : entityClasses) {
-                    System.out.println("Registering entity class: " + entityClass.getName());
-                    registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
+
+                if (manualEntities != null) {
+                    for (Class<? extends IdentifiableEntity> entityClass : manualEntities) {
+                        registerEntityClass(entityClass);
+                    }
                 }
 
+                Set<String> registeredPackages = new HashSet<>();
+                if (manualEntities != null) {
+                    for (Class<? extends IdentifiableEntity> entityClass : manualEntities) {
+                        registeredPackages.add(entityClass.getPackageName());
+                    }
+                }
+
+                Set<Class<?>> entityClasses = scanEntities(registeredPackages);
+                for (Class<?> entityClass : entityClasses) {
+                    registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
+                }
 
                 this.sessionFactory = addEntitiesToConfiguration(configuration).buildSessionFactory();
             }
@@ -80,17 +97,29 @@ public class SessionManager {
         }
     }
 
-
-
     public Class<?> getEntityClass(String name) {
         return registeredEntityClasses.get(name);
     }
 
-    public static void initialize(HashMap<ClassLoader, Class<? extends IdentifiableEntity>> entityClasses, SQLAuthProvider authProvider, String user, String password, int poolSize, int threadPoolSize) {
-        if (instance == null) {
-            instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, threadPoolSize);
-        } else {
-            throw new IllegalStateException("SessionManager is already initialized!");
+    public boolean isRegisteredEntity(String name) {
+        return registeredEntityClasses.containsKey(name);
+    }
+
+    public static void initialize(
+            List<Class<? extends IdentifiableEntity>> entityClasses,
+            SQLAuthProvider authProvider,
+            String user,
+            String password,
+            int poolSize,
+            int threadPoolSize,
+            String hbm2ddlAuto
+    ) {
+        synchronized (LOCK) {
+            if (instance == null) {
+                instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, threadPoolSize, hbm2ddlAuto);
+            } else {
+                throw new IllegalStateException("SessionManager is already initialized!");
+            }
         }
     }
 
@@ -99,10 +128,11 @@ public class SessionManager {
     }
 
     public static SessionManager get() {
-        if (instance == null) {
+        SessionManager local = instance;
+        if (local == null) {
             throw new IllegalStateException("SessionManager is not initialized! Call initialize() first.");
         }
-        return instance;
+        return local;
     }
 
     public Session getSession() {
@@ -120,39 +150,35 @@ public class SessionManager {
             }
         } catch (InterruptedException e) {
             threadPool.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 
-    public void registerEntityClass(ClassLoader classLoader, Class<?> entityClass) {
-        System.out.println("Registering entity class: " + entityClass.getName()+" manually");
-        try {
-            classLoader.loadClass(entityClass.getPackageName());
-        } catch (ClassNotFoundException e) {
-            e.printStackTrace();
-        }
+    private void registerEntityClass(Class<?> entityClass) {
         registeredEntityClasses.put(entityClass.getSimpleName(), entityClass);
     }
 
     private Configuration addEntitiesToConfiguration(Configuration configuration) {
         for (Class<?> entityClass : registeredEntityClasses.values()) {
-            System.out.println("Configuring entity class: " + entityClass.getName());
             configuration.addAnnotatedClass(entityClass);
         }
         return configuration;
     }
 
-    private Set<Class<?>> scanEntities() {
+    private Set<Class<?>> scanEntities(Set<String> allowedPackages) {
         Set<Class<?>> entityClasses = new HashSet<>();
 
-        try (ScanResult scanResult = new ClassGraph()
-                .enableAnnotationInfo()
-                .scan()) {
+        ClassGraph classGraph = new ClassGraph().enableAnnotationInfo();
+        if (!allowedPackages.isEmpty()) {
+            classGraph.acceptPackages(allowedPackages.toArray(new String[0]));
+        }
 
+        try (ScanResult scanResult = classGraph.scan()) {
             scanResult.getClassesWithAnnotation(Entity.class.getName()).forEach(classInfo -> {
                 try {
                     entityClasses.add(Class.forName(classInfo.getName()));
                 } catch (ClassNotFoundException e) {
-                    e.printStackTrace();
+                    System.err.println("WARN: Failed to load entity class: " + classInfo.getName());
                 }
             });
         }
