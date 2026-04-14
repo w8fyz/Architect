@@ -1,43 +1,61 @@
-# **HOW TO USE ARCHITECT?**
+# Architect
 
-## **Prerequisites**
+A lightweight Java ORM framework built on top of Hibernate, with optional Redis caching and pub/sub relay for distributed architectures.
 
-A **SQL** database is required. Additionally, for caching (optional but recommended), **Redis** is needed.
+## Requirements
 
-You will need to use a **SQLAuthProvider** in the database credentials.
-Choose it accordingly of what your database need, currenctly these drivers are supported :
+- **Java 21+**
+- A SQL database (PostgreSQL, MySQL, MariaDB, H2, SQLite)
+- Redis (optional, for caching and relay)
 
-- **H2Auth** (H2 Database)
-- **MariaDBAuth** (MariaDB Database)
-- **MySQLAuth** (MySQL Database)
-- **PostgreSQLAuth** (PostgreSQL Database)
-- **SQLiteAuth** (SQLite Database)
+## Installation
 
-## **Instance**
+### Gradle
 
-The first step is to create an instance of Architect. The syntax is simple, as a builder is integrated into the class:
-
-```java
-Architect architect = new Architect();
-
-architect.setReceiver(false); // See "Repositories - GenericRelayRepository" section
-
-architect.setDatabaseCredentials(new DatabaseCredentials(
-        new MySQLAuth("hostname",3306,"database") ,"username","password", 12));
-
-architect.setRedisCredentials(new RedisCredentials("localhost",
-        "password", 6379, 2000, 10));
-
-architect.start();
+```groovy
+dependencies {
+    implementation 'sh.fyz:architect:2.0.0'
+}
 ```
 
-Once this is done, the Architect instance is up and running! It is thread-safe and essentially sets up connections to the various databases.
+### Maven
 
-# **Entity**
+```xml
+<dependency>
+    <groupId>sh.fyz</groupId>
+    <artifactId>architect</artifactId>
+    <version>2.0.0</version>
+</dependency>
+```
 
-To use Architect, you need to create entities. These are Java objects with just two annotations and one additional implementation.
-For example, let’s create a "User" entity:
+## Quick Start
 
+```java
+Architect architect = new Architect()
+    .setReceiver(true)
+    .setDatabaseCredentials(new DatabaseCredentials(
+        new PostgreSQLAuth("localhost", 5432, "mydb"),
+        "user", "password", 10
+    ));
+
+architect.addEntityClass(User.class);
+architect.start();
+
+GenericRepository<User> users = new GenericRepository<>(User.class);
+
+User user = new User("John", "john@example.com", 25);
+users.save(user);
+
+User found = users.query()
+    .where("email", "john@example.com")
+    .findFirst();
+
+architect.stop();
+```
+
+## Entities
+
+Entities must implement `IdentifiableEntity` and use JPA annotations. A no-arg constructor is required.
 
 ```java
 @Entity
@@ -52,137 +70,274 @@ public class User implements IdentifiableEntity {
     private String email;
     private int age;
 
+    public User() {}
+
     public User(String name, String email, int age) {
         this.name = name;
         this.email = email;
         this.age = age;
     }
 
-    public User() {
-    }
-
-    public void setId(Long id) {
-        this.id = id;
-    }
-
-    public Long getId() {
-        return id;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public String getEmail() {
-        return email;
-    }
-
-    public void setEmail(String email) {
-        this.email = email;
-    }
-
-    public int getAge() {
-        return age;
-    }
-
-    public void setAge(int age) {
-        this.age = age;
-    }
-
     @Override
-    public String toString() {
-        return "User{" +
-                "id=" + id +
-                ", name='" + name + '\'' +
-                ", email='" + email + '\'' +
-                ", age=" + age +
-                '}';
-    }
+    public Long getId() { return id; }
+
+    // getters and setters...
 }
 ```
 
-Here, the key part is the **@Entity** annotation, which marks this Java object as an entity usable with the database.
-The **@Table** annotation specifies the table name in the database, and the IdentifiableEntity interface serves as a reference for the ID.
-You also **need** an empty constructor for your entity, like "User();"
+## Configuration
 
-# **Repository**
-A Repository is essentially the manager of operations you can perform on an entity type. Each entity has its own dedicated Repository.
+### Architect Instance
 
-All repositories work in fundamentally the same way and can be swapped by changing their type.
-The following types of repositories are available:
+```java
+Architect architect = new Architect();
 
-- GenericRepository - A standard repository that works directly with the database.
-- GenericCachedRepository - A repository that prioritizes Redis for data, falling back to the database if the data isn’t in Redis (and then caching it).
-- GenericRelayRepository - A repository to use only with an Architect instance that doesn’t directly access the database.
+// Required: this instance writes to the database
+architect.setReceiver(true);
 
-For example, in a Minecraft server setup, if we have an Architect instance with a database and Redis running on the BungeeCord server, we don’t want all servers connecting to the database simultaneously to avoid connection overload. Instead, on the Spigot server plugin, we use a GenericRelayRepository, which sends database queries via Redis pub/sub.
-This allows database interaction without direct connections!
+// Required: database connection
+architect.setDatabaseCredentials(new DatabaseCredentials(
+    new PostgreSQLAuth("localhost", 5432, "mydb"),
+    "user", "password",
+    10,   // connection pool size
+    10,   // thread pool size
+    "update" // hbm2ddl.auto strategy
+));
 
-Here’s an example Repository for the User system:
+// Optional: Redis for caching / relay
+architect.setRedisCredentials(new RedisCredentials(
+    "localhost", "password", 6379, 2000, 10
+));
+
+// Register entity classes
+architect.addEntityClass(User.class);
+architect.addEntityClass(Product.class);
+
+architect.start();
+```
+
+### SQL Providers
+
+| Provider | Constructor |
+|---|---|
+| `PostgreSQLAuth` | `(host, port, database)` |
+| `MySQLAuth` | `(host, port, database)` |
+| `MariaDBAuth` | `(host, port, database)` |
+| `H2Auth` | `(host, port, database)` |
+| `SQLiteAuth` | `(databasePath)` |
+
+### DatabaseCredentials
+
+```java
+// Minimal (defaults: threadPoolSize=10, hbm2ddl="update")
+new DatabaseCredentials(provider, user, password, poolSize)
+
+// Full control
+new DatabaseCredentials(provider, user, password, poolSize, threadPoolSize, hbm2ddlAuto)
+```
+
+`hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"validate"`, `"none"`.
+
+## Repositories
+
+### GenericRepository
+
+Standard database access with Hibernate sessions.
+
+```java
+GenericRepository<User> users = new GenericRepository<>(User.class);
+
+// CRUD
+User saved = users.save(user);
+User found = users.findById(1L);
+List<User> all = users.all();
+users.delete(user);
+
+// Async variants
+users.saveAsync(user, onSuccess, onError);
+users.findByIdAsync(1L, onSuccess, onError);
+users.allAsync(onSuccess, onError);
+users.deleteAsync(user, onSuccess, onError);
+```
+
+### GenericCachedRepository
+
+Redis-first reads. Falls back to database on cache miss, then populates the cache. Writes are queued and flushed to the database periodically.
+
+```java
+GenericCachedRepository<User> users = new GenericCachedRepository<>(User.class);
+```
+
+Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache.
+
+### GenericRelayRepository
+
+For distributed setups. Publishes save/delete operations via Redis pub/sub to a receiver instance, instead of writing to the database directly.
+
+```java
+// On a non-receiver instance (e.g. game server)
+Architect architect = new Architect()
+    .setReceiver(false)
+    .setRedisCredentials(new RedisCredentials(...));
+architect.start();
+
+GenericRelayRepository<User> users = new GenericRelayRepository<>(User.class);
+users.save(user); // sent via Redis pub/sub to the receiver
+```
+
+### Custom Repositories
+
+Extend any repository type to add domain-specific methods:
 
 ```java
 public class UserRepository extends GenericRepository<User> {
-    public UserRepository(Class<User> type) {
-        super(type);
+    public UserRepository() {
+        super(User.class);
     }
 
-    public User findByName(String name) {
-        return where("name", name);
+    public User findByEmail(String email) {
+        return query().where("email", email).findFirst();
     }
 
-    public void findByNameAsync(String name, Consumer<User> action) {
-        whereAsync("name", name, action, (user) -> {});
+    public List<User> findAdults() {
+        return query().where("age", Operator.GTE, 18).findAll();
     }
 }
 ```
 
-Here, we use a standard GenericRepository with the type **User**.
-The parent constructor (super) requires the same type class, i.e., **User.class**.
+### RepositoryRegistry
 
-Now, we can interact with the database by creating useful methods, such as:
-
-```java
-    public User findByName(String name) {
-        return where("name", name);
-    }
-```
-This uses the parent where function with the name field, enabling calls like:
-
-**userRepository.findByName(userName);**
-
-You can also save data using:
-
-**userRepository.save(user);**
-
-And that’s it! You now have access to your database system without having to create tables or specialized SQL utilities. Everything is managed by the parent functions.
-
-Complete example:
+Register repositories for cross-repository lookups (used by cached/relay repos for relation resolution):
 
 ```java
-        Architect architect = new Architect().setReceiver(true)
-                .setDatabaseCredentials(new DatabaseCredentials(
-                        new MySQLAuth("hostname",3306,"database") ,"username","password", 12));
-                .setRedisCredentials(new RedisCredentials("host", "motdepasse", 6379, 1000, 10));
-        architect.start();
+architect.addRepositories(
+    new GenericRepository<>(User.class),
+    new GenericRepository<>(Product.class)
+);
 
-        UserRepository userRepository = new UserRepository(User.class);
-
-        User user = new User("John Doe", "john.doe@email.fr", 17);
-
-        userRepository.save(user);
-
-        User fetchedUser = userRepository.findByName("John Doe");
-        
-        System.out.println("Fetched user: " + fetchedUser);
-
-        architect.stop();
+// Manual access
+RepositoryRegistry.get().getRepository("users");
 ```
 
-# **Closing Notes and Important Reminder**
+## QueryBuilder
 
-Updates are on the way. If you encounter bugs or have questions, don’t hesitate to reach out.
-**IMPORTANT: Always close your sessions at the end of the program by calling architect.stop() on your Architect instance.**
+Entry point: `repository.query()`. All conditions are combined with `AND`.
+
+### Filtering
+
+```java
+// Equality
+query().where("name", "John")
+
+// Comparison operators: EQ, NEQ, GT, GTE, LT, LTE
+query().where("age", Operator.GTE, 18)
+
+// Pattern matching
+query().whereLike("name", "John%")
+
+// Set membership
+query().whereIn("category", List.of("A", "B", "C"))
+query().whereNotIn("status", List.of("banned", "suspended"))
+
+// Null checks
+query().whereNull("deletedAt")
+query().whereNotNull("email")
+
+// Multiple conditions (AND)
+query()
+    .where("category", "Electronics")
+    .where("price", Operator.LT, 100.0)
+    .where("active", true)
+```
+
+### Raw HQL
+
+For complex expressions not covered by the builder:
+
+```java
+// With named parameters
+query().whereRaw("LOWER(name) = :val", Map.of("val", "john"))
+
+// BETWEEN
+query().whereRaw("price BETWEEN :min AND :max", Map.of("min", 10.0, "max", 100.0))
+
+// Without parameters
+query().whereRaw("active = true")
+
+// Combined with builder conditions
+query()
+    .where("category", "Electronics")
+    .whereRaw("LENGTH(name) > :len", Map.of("len", 5))
+```
+
+### Sorting
+
+```java
+query().orderBy("name")                        // ASC (default)
+query().orderBy("price", SortOrder.DESC)       // DESC
+query().orderBy("category").orderBy("name")    // multi-column
+```
+
+### Pagination
+
+```java
+query().limit(10)                   // first 10 results
+query().limit(10).offset(20)       // page 3 (10 per page)
+
+query()
+    .where("active", true)
+    .orderBy("createdAt", SortOrder.DESC)
+    .limit(25)
+    .offset(0)
+    .findAll();
+```
+
+### Terminal Operations
+
+```java
+List<User> users = query().where("active", true).findAll();
+User user         = query().where("email", "john@example.com").findFirst();
+long count        = query().where("category", "Books").count();
+int deleted       = query().where("active", false).delete();
+```
+
+### Async Terminal Operations
+
+All terminal operations have async variants returning `CompletableFuture`:
+
+```java
+CompletableFuture<List<User>> users = query().where("active", true).findAllAsync();
+CompletableFuture<User> user        = query().where("email", "x").findFirstAsync();
+CompletableFuture<Long> count       = query().where("category", "A").countAsync();
+CompletableFuture<Integer> deleted  = query().where("active", false).deleteAsync();
+```
+
+## Operators Reference
+
+| Operator | Description | Example |
+|---|---|---|
+| `EQ` | Equal (default) | `.where("name", "John")` |
+| `NEQ` | Not equal | `.where("status", Operator.NEQ, "banned")` |
+| `GT` | Greater than | `.where("age", Operator.GT, 18)` |
+| `GTE` | Greater than or equal | `.where("price", Operator.GTE, 9.99)` |
+| `LT` | Less than | `.where("stock", Operator.LT, 5)` |
+| `LTE` | Less than or equal | `.where("rating", Operator.LTE, 3)` |
+| `LIKE` | SQL LIKE pattern | `.whereLike("name", "%john%")` |
+| `IN` | In collection | `.whereIn("id", List.of(1, 2, 3))` |
+| `NOT_IN` | Not in collection | `.whereNotIn("status", List.of("x"))` |
+| `IS_NULL` | Is null | `.whereNull("deletedAt")` |
+| `IS_NOT_NULL` | Is not null | `.whereNotNull("email")` |
+
+## Lifecycle
+
+Always shut down Architect when your application stops:
+
+```java
+architect.stop();
+```
+
+This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis.
+
+## License
+
+MIT

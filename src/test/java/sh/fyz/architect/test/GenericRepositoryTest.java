@@ -27,11 +27,17 @@ public class GenericRepositoryTest {
 
     @BeforeAll
     void setup() {
+        String host = System.getenv().getOrDefault("DB_HOST", "localhost");
+        int port = Integer.parseInt(System.getenv().getOrDefault("DB_PORT", "5440"));
+        String db = System.getenv().getOrDefault("DB_NAME", "freshapi");
+        String user = System.getenv().getOrDefault("DB_USER", "freshapi");
+        String pass = System.getenv().getOrDefault("DB_PASS", "freshapi");
+
         architect = new Architect()
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
-                new PostgreSQLAuth("localhost", 5440, "architect"),
-                "architect", "architect", 4, 4, "create-drop"
+                new PostgreSQLAuth(host, port, db),
+                user, pass, 4, 4, "create-drop"
             ));
         architect.addEntityClass(Product.class);
         architect.start();
