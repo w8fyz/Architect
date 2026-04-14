@@ -187,10 +187,11 @@ users.save(user); // sent via Redis pub/sub to the receiver
 
 ### Custom Repositories
 
-Extend any repository type to add domain-specific methods:
+The recommended way to use Architect is to create a dedicated repository class per entity. This keeps all query logic centralized and reusable:
 
 ```java
 public class UserRepository extends GenericRepository<User> {
+
     public UserRepository() {
         super(User.class);
     }
@@ -200,8 +201,60 @@ public class UserRepository extends GenericRepository<User> {
     }
 
     public List<User> findAdults() {
-        return query().where("age", Operator.GTE, 18).findAll();
+        return query()
+            .where("age", Operator.GTE, 18)
+            .orderBy("name")
+            .findAll();
     }
+
+    public List<User> findActiveByCountry(String country) {
+        return query()
+            .where("country", country)
+            .where("active", true)
+            .orderBy("createdAt", SortOrder.DESC)
+            .findAll();
+    }
+
+    public List<User> search(String keyword, int page, int pageSize) {
+        return query()
+            .whereLike("name", "%" + keyword + "%")
+            .orderBy("name")
+            .limit(pageSize)
+            .offset(page * pageSize)
+            .findAll();
+    }
+
+    public long countByRole(String role) {
+        return query().where("role", role).count();
+    }
+
+    public int deactivateUnverified() {
+        return query()
+            .where("verified", false)
+            .whereRaw("createdAt < :cutoff", Map.of("cutoff", someDateValue))
+            .delete();
+    }
+}
+```
+
+Then use it:
+
+```java
+UserRepository users = new UserRepository();
+
+User john = users.findByEmail("john@example.com");
+List<User> adults = users.findAdults();
+List<User> page2 = users.search("doe", 1, 25);
+```
+
+You can also extend `GenericCachedRepository` or `GenericRelayRepository` the same way:
+
+```java
+public class UserCachedRepository extends GenericCachedRepository<User> {
+    public UserCachedRepository() {
+        super(User.class);
+    }
+    // same custom methods, backed by Redis cache
 }
 ```
 

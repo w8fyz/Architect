@@ -87,6 +87,41 @@ SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAu
 
 All share the same public API. Instantiate with `new XxxRepository<>(Entity.class)`.
 
+## Custom Repositories (recommended pattern)
+
+Create a dedicated class per entity to centralize query logic:
+
+```java
+public class UserRepository extends GenericRepository<User> {
+    public UserRepository() { super(User.class); }
+
+    public User findByEmail(String email) {
+        return query().where("email", email).findFirst();
+    }
+
+    public List<User> findActiveByCountry(String country) {
+        return query()
+            .where("country", country)
+            .where("active", true)
+            .orderBy("createdAt", SortOrder.DESC)
+            .findAll();
+    }
+
+    public List<User> search(String keyword, int page, int pageSize) {
+        return query()
+            .whereLike("name", "%" + keyword + "%")
+            .orderBy("name")
+            .limit(pageSize)
+            .offset(page * pageSize)
+            .findAll();
+    }
+}
+```
+
+Usage: `UserRepository users = new UserRepository();`
+
+Same pattern works with `GenericCachedRepository` and `GenericRelayRepository`.
+
 ## CRUD
 
 ```java
