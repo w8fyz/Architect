@@ -65,9 +65,9 @@ mavenPublishing {
             }
         }
         scm {
-            url = "https://github.com/fyz-sh/architect"
-            connection = "scm:git:git://github.com/fyz-sh/architect.git"
-            developerConnection = "scm:git:ssh://git@github.com/fyz-sh/architect.git"
+            url = "https://github.com/w8fyz/Architect"
+            connection = "scm:git:git://github.com/w8fyz/Architect.git"
+            developerConnection = "scm:git:ssh://git@github.com/w8fyz/Architect.git"
         }
     }
 
