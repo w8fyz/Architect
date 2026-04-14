@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:architect:2.0.0'
+    implementation 'sh.fyz:Architect:2.0.0'
 }
 ```
 
@@ -23,7 +23,7 @@ dependencies {
 ```xml
 <dependency>
     <groupId>sh.fyz</groupId>
-    <artifactId>architect</artifactId>
+    <artifactId>Architect</artifactId>
     <version>2.0.0</version>
 </dependency>
 ```
