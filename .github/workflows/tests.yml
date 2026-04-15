@@ -58,7 +58,8 @@ jobs:
 
       - name: Configure Redis password
         run: |
-          sudo apt-get install -y redis-tools > /dev/null 2>&1 || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-tools
           redis-cli -h localhost -p 6380 CONFIG SET requirepass architect
 
       - name: Run tests
