@@ -1,11 +1,6 @@
 package sh.fyz.architect.persistent.sql;
 
-import java.util.regex.Pattern;
-
 public abstract class SQLAuthProvider {
-
-    private static final Pattern SAFE_HOST_PATTERN = Pattern.compile("^[a-zA-Z0-9._-]+$");
-    private static final Pattern SAFE_DB_PATTERN = Pattern.compile("^[a-zA-Z0-9._/-]+$");
 
     public abstract String getDialect();
 
@@ -14,17 +9,14 @@ public abstract class SQLAuthProvider {
     public abstract String getUrl();
 
     protected static void validateHost(String hostname) {
-        if (hostname == null || !SAFE_HOST_PATTERN.matcher(hostname).matches()) {
-            throw new IllegalArgumentException("Invalid hostname: must contain only alphanumeric characters, dots, hyphens, and underscores");
+        if (hostname == null) {
+            throw new IllegalArgumentException("Invalid hostname: hostname cannot be null");
         }
     }
 
     protected static void validateDatabase(String database) {
-        if (database == null || !SAFE_DB_PATTERN.matcher(database).matches()) {
-            throw new IllegalArgumentException("Invalid database name: must contain only alphanumeric characters, dots, slashes, hyphens, and underscores");
-        }
-        if (database.contains("?") || database.contains("&") || database.contains("=") || database.contains(";")) {
-            throw new IllegalArgumentException("Database name must not contain query parameters");
+        if (database == null) {
+            throw new IllegalArgumentException("Invalid database name: database name cannot be null");
         }
     }
 
