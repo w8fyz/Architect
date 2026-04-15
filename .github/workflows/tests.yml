@@ -12,15 +12,25 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_USER: architect
           POSTGRES_PASSWORD: architect
-          POSTGRES_DB: architect
+          POSTGRES_DB: architect_test
         ports:
           - 5440:5432
         options: >-
           --health-cmd "pg_isready -U architect"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -46,13 +56,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Configure Redis password
+        run: |
+          sudo apt-get install -y redis-tools > /dev/null 2>&1 || true
+          redis-cli -h localhost -p 6380 CONFIG SET requirepass architect
+
       - name: Run tests
         env:
           DB_HOST: localhost
           DB_PORT: 5440
-          DB_NAME: architect
+          DB_NAME: architect_test
           DB_USER: architect
           DB_PASS: architect
+          REDIS_HOST: localhost
+          REDIS_PORT: 6380
+          REDIS_PASS: architect
         run: ./gradlew test
 
       - name: Upload test report

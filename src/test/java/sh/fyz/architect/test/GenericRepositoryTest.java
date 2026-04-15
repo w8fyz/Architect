@@ -29,9 +29,9 @@ public class GenericRepositoryTest {
     void setup() {
         String host = System.getenv().getOrDefault("DB_HOST", "localhost");
         int port = Integer.parseInt(System.getenv().getOrDefault("DB_PORT", "5440"));
-        String db = System.getenv().getOrDefault("DB_NAME", "freshapi");
-        String user = System.getenv().getOrDefault("DB_USER", "freshapi");
-        String pass = System.getenv().getOrDefault("DB_PASS", "freshapi");
+        String db = System.getenv().getOrDefault("DB_NAME", "architect_test");
+        String user = System.getenv().getOrDefault("DB_USER", "architect");
+        String pass = System.getenv().getOrDefault("DB_PASS", "architect");
 
         architect = new Architect()
             .setReceiver(true)
