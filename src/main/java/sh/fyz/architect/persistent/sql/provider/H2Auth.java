@@ -1,14 +1,14 @@
-package sh.fyz.architect.persistant.sql.provider;
+package sh.fyz.architect.persistent.sql.provider;
 
-import sh.fyz.architect.persistant.sql.SQLAuthProvider;
+import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 
-public class MySQLAuth extends SQLAuthProvider {
+public class H2Auth extends SQLAuthProvider {
 
     private final String hostname;
     private final String database;
     private final int port;
 
-    public MySQLAuth(String hostname, int port, String database) {
+    public H2Auth(String hostname, int port, String database) {
         validateHost(hostname);
         validatePort(port);
         validateDatabase(database);
@@ -19,16 +19,16 @@ public class MySQLAuth extends SQLAuthProvider {
 
     @Override
     public String getDialect() {
-        return "org.hibernate.dialect.MySQLDialect";
+        return "org.hibernate.dialect.H2Dialect";
     }
 
     @Override
     public String getDriver() {
-        return "com.mysql.cj.jdbc.Driver";
+        return "org.h2.Driver";
     }
 
     @Override
     public String getUrl() {
-        return "jdbc:mysql://" + hostname + ":" + port + "/" + database;
+        return "jdbc:h2:tcp://" + hostname + ":" + port + "/" + database;
     }
 }

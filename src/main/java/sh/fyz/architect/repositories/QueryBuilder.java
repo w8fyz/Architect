@@ -94,12 +94,14 @@ public class QueryBuilder<T> {
     /**
      * Adds a raw HQL WHERE fragment without parameters.
      *
-     * <pre>{@code
-     * repository.query()
-     *     .whereRaw("active = true")
-     *     .findAll();
-     * }</pre>
+     * <p><b>WARNING: Never pass user-controlled input directly to this method.</b>
+     * The HQL fragment is inserted as-is into the query, which can lead to HQL injection
+     * if user input is concatenated into the fragment. Use {@link #whereRaw(String, Map)}
+     * with named parameters instead.</p>
+     *
+     * @deprecated Use {@link #whereRaw(String, Map)} with named parameters instead to prevent HQL injection.
      */
+    @Deprecated
     public QueryBuilder<T> whereRaw(String hqlFragment) {
         rawConditions.add(new RawCondition(hqlFragment, Map.of()));
         return this;

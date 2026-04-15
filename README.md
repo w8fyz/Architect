@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.0.0'
+    implementation 'sh.fyz:Architect:2.1.0'
 }
 ```
 
@@ -24,7 +24,7 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.0.0</version>
+    <version>2.1.0</version>
 </dependency>
 ```
 
@@ -313,9 +313,6 @@ query().whereRaw("LOWER(name) = :val", Map.of("val", "john"))
 
 // BETWEEN
 query().whereRaw("price BETWEEN :min AND :max", Map.of("min", 10.0, "max", 100.0))
-
-// Without parameters
-query().whereRaw("active = true")
 
 // Combined with builder conditions
 query()

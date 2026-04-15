@@ -1,4 +1,4 @@
-package sh.fyz.architect.persistant.sql;
+package sh.fyz.architect.persistent.sql;
 
 import java.util.regex.Pattern;
 

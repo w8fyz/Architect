@@ -1,6 +1,6 @@
 package sh.fyz.architect.repositories;
 
-import sh.fyz.architect.persistant.SessionManager;
+import sh.fyz.architect.persistent.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
 import org.hibernate.query.Query;
@@ -19,6 +19,7 @@ public class GenericRepository<T> {
     protected final ExecutorService threadPool;
 
     private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Class<?>, Field> ID_FIELD_CACHE = new ConcurrentHashMap<>();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
@@ -57,37 +58,43 @@ public class GenericRepository<T> {
         }
         if (!getValidFieldNames().contains(fieldName)) {
             throw new IllegalArgumentException(
-                "Invalid field name '" + fieldName + "' for entity " + type.getSimpleName() +
-                ". Valid fields: " + getValidFieldNames()
+                "Invalid field name '" + fieldName + "' for entity " + type.getSimpleName()
             );
         }
     }
 
     // --- ID PREPARATION ---
 
-    public Object prepareEntityId(String value) {
-        try {
-            Field field = type.getDeclaredField("id");
-            Class<?> fieldType = field.getType();
-            if (fieldType == Long.class || fieldType == long.class) {
-                return Long.parseLong(value);
-            } else if (fieldType == UUID.class) {
-                return UUID.fromString(value);
-            } else if (fieldType == Integer.class || fieldType == int.class) {
-                return Integer.parseInt(value);
-            } else if (fieldType == String.class) {
-                return value;
-            } else if (fieldType == Double.class || fieldType == double.class) {
-                return Double.parseDouble(value);
-            } else if (fieldType == Float.class || fieldType == float.class) {
-                return Float.parseFloat(value);
-            } else if (fieldType == Boolean.class || fieldType == boolean.class) {
-                return Boolean.parseBoolean(value);
-            } else {
-                throw new IllegalArgumentException("Unsupported ID type: " + fieldType.getName());
+    private Field getIdField(Class<?> clazz) {
+        return ID_FIELD_CACHE.computeIfAbsent(clazz, c -> {
+            try {
+                return c.getDeclaredField("id");
+            } catch (NoSuchFieldException e) {
+                return null;
             }
-        } catch (NoSuchFieldException e) {
+        });
+    }
+
+    public Object prepareEntityId(String value) {
+        Field field = getIdField(type);
+        if (field == null) return value;
+        Class<?> fieldType = field.getType();
+        if (fieldType == Long.class || fieldType == long.class) {
+            return Long.parseLong(value);
+        } else if (fieldType == UUID.class) {
+            return UUID.fromString(value);
+        } else if (fieldType == Integer.class || fieldType == int.class) {
+            return Integer.parseInt(value);
+        } else if (fieldType == String.class) {
             return value;
+        } else if (fieldType == Double.class || fieldType == double.class) {
+            return Double.parseDouble(value);
+        } else if (fieldType == Float.class || fieldType == float.class) {
+            return Float.parseFloat(value);
+        } else if (fieldType == Boolean.class || fieldType == boolean.class) {
+            return Boolean.parseBoolean(value);
+        } else {
+            throw new IllegalArgumentException("Unsupported ID type: " + fieldType.getName());
         }
     }
 

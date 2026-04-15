@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'sh.fyz'
-version = '2.0.0'
+version = '2.1.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_21
@@ -33,7 +33,6 @@ dependencies {
     api "jakarta.persistence:jakarta.persistence-api:3.2.0"
 
     implementation "com.zaxxer:HikariCP:7.0.2"
-    implementation "org.reflections:reflections:0.10.2"
     implementation 'redis.clients:jedis:7.4.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.2'

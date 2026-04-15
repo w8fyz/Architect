@@ -1,6 +1,6 @@
-package sh.fyz.architect.persistant.sql.provider;
+package sh.fyz.architect.persistent.sql.provider;
 
-import sh.fyz.architect.persistant.sql.SQLAuthProvider;
+import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 
 public class MariaDBAuth extends SQLAuthProvider {
 

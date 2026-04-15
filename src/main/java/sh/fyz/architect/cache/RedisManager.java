@@ -1,6 +1,9 @@
 package sh.fyz.architect.cache;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import jakarta.persistence.Id;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
@@ -9,9 +12,10 @@ import jakarta.persistence.OneToOne;
 import redis.clients.jedis.*;
 import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.resps.ScanResult;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -22,6 +26,8 @@ public class RedisManager {
 
     private static volatile RedisManager instance;
     private static final Object LOCK = new Object();
+
+    private static final TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<>() {};
 
     private RedisQueueActionPool redisQueueActionPool;
     private final JedisPool jedisPool;
@@ -39,12 +45,16 @@ public class RedisManager {
         config.setMaxTotal(maxConnections);
         config.setMaxIdle(maxConnections / 2);
         config.setMinIdle(1);
+        config.setTestOnBorrow(true);
+        config.setTimeBetweenEvictionRuns(java.time.Duration.ofSeconds(30));
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
         this.keyPrefix = "architect:";
         if (receiver) {
             clearArchitectKeys();
         }
         this.objectMapper = new ObjectMapper();
+        this.objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        this.objectMapper.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
         this.isReceiver = receiver;
     }
 
@@ -94,6 +104,15 @@ public class RedisManager {
         }
     }
 
+    public static void reset() {
+        synchronized (LOCK) {
+            if (instance != null) {
+                instance.shutdown();
+                instance = null;
+            }
+        }
+    }
+
     public boolean isAlive() {
         return isAlive;
     }
@@ -104,6 +123,10 @@ public class RedisManager {
             throw new IllegalStateException("RedisManager is not initialized! Call initialize() first.");
         }
         return local;
+    }
+
+    public static boolean isInitialized() {
+        return instance != null;
     }
 
     public <T> void save(String key, T entity) {
@@ -119,7 +142,7 @@ public class RedisManager {
         try (Jedis jedis = jedisPool.getResource()) {
             String data = jedis.get(keyPrefix + key);
             if (data != null) {
-                Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
+                Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
                 return reconstructEntity(rawData, type);
             }
             return null;
@@ -147,7 +170,7 @@ public class RedisManager {
                             String data = resp.get();
                             if (data != null) {
                                 try {
-                                    Map<String, Object> rawData = objectMapper.readValue(data, new TypeReference<Map<String, Object>>() {});
+                                    Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
                                     T entity = reconstructEntity(rawData, type);
                                     if (entity != null) result.add(entity);
                                 } catch (Exception e) {
@@ -275,10 +298,12 @@ public class RedisManager {
 
     private Class<?> getGenericType(Field field) {
         try {
-            String typeName = field.getGenericType().getTypeName();
-            if (typeName.contains("<")) {
-                String genericTypeName = typeName.substring(typeName.indexOf("<") + 1, typeName.indexOf(">"));
-                return Class.forName(genericTypeName);
+            Type genericType = field.getGenericType();
+            if (genericType instanceof ParameterizedType parameterizedType) {
+                Type[] typeArgs = parameterizedType.getActualTypeArguments();
+                if (typeArgs.length > 0 && typeArgs[0] instanceof Class<?> clazz) {
+                    return clazz;
+                }
             }
         } catch (Exception e) {
             System.err.println("WARN: Failed to resolve generic type for field " + field.getName() + ": " + e.getMessage());

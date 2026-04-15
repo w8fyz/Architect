@@ -1,4 +1,4 @@
-package sh.fyz.architect.persistant;
+package sh.fyz.architect.persistent;
 
 import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
@@ -9,9 +9,10 @@ import org.hibernate.cfg.Environment;
 
 import jakarta.persistence.Entity;
 import sh.fyz.architect.entities.IdentifiableEntity;
-import sh.fyz.architect.persistant.sql.SQLAuthProvider;
+import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -23,7 +24,7 @@ public class SessionManager {
     private static final Object LOCK = new Object();
 
     private SessionFactory sessionFactory;
-    private final HashMap<String, Class<?>> registeredEntityClasses = new HashMap<>();
+    private final ConcurrentHashMap<String, Class<?>> registeredEntityClasses = new ConcurrentHashMap<>();
     private final ExecutorService threadPool;
 
     private SessionManager(
@@ -123,6 +124,15 @@ public class SessionManager {
         }
     }
 
+    public static void reset() {
+        synchronized (LOCK) {
+            if (instance != null) {
+                instance.close();
+                instance = null;
+            }
+        }
+    }
+
     public ExecutorService getThreadPool() {
         return threadPool;
     }
@@ -135,7 +145,14 @@ public class SessionManager {
         return local;
     }
 
+    public static boolean isInitialized() {
+        return instance != null;
+    }
+
     public Session getSession() {
+        if (sessionFactory == null) {
+            throw new IllegalStateException("SessionFactory is not available. No database credentials were provided.");
+        }
         return sessionFactory.openSession();
     }
 

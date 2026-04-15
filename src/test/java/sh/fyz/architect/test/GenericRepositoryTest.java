@@ -2,8 +2,8 @@ package sh.fyz.architect.test;
 
 import org.junit.jupiter.api.*;
 import sh.fyz.architect.Architect;
-import sh.fyz.architect.persistant.DatabaseCredentials;
-import sh.fyz.architect.persistant.sql.provider.PostgreSQLAuth;
+import sh.fyz.architect.persistent.DatabaseCredentials;
+import sh.fyz.architect.persistent.sql.provider.PostgreSQLAuth;
 import sh.fyz.architect.repositories.GenericRepository;
 import sh.fyz.architect.repositories.QueryBuilder;
 import sh.fyz.architect.repositories.QueryBuilder.Operator;
@@ -640,6 +640,7 @@ public class GenericRepositoryTest {
     @Test
     @Order(113)
     @DisplayName("query().whereRaw() - Sans parametres")
+    @SuppressWarnings("deprecation")
     void testQueryWhereRawNoParams() {
         repository.save(new Product("Active", "Cat", 10.0, 1, true));
         repository.save(new Product("Inactive", "Cat", 20.0, 1, false));
@@ -876,7 +877,6 @@ public class GenericRepositoryTest {
     void benchmarkAll() {
         List<BenchResult> results = new ArrayList<>();
 
-        // --- Preparation : inserer des donnees de base ---
         for (int i = 0; i < 100; i++) {
             repository.save(new Product(
                 "BenchProduct" + i,
@@ -894,64 +894,52 @@ public class GenericRepositoryTest {
         System.out.println("  BENCHMARK - GenericRepository (100 entites en base)");
         System.out.println("=".repeat(90));
 
-        // --- save() ---
         results.add(bench("save() - nouvelle entite", 100, () -> {
             repository.save(new Product("Tmp", "Bench", 1.0, 1, true));
         }));
 
-        // --- save() update ---
         Product toUpdate = repository.findById(sampleId);
         results.add(bench("save() - update existant", 200, () -> {
             toUpdate.setStock(toUpdate.getStock() + 1);
             repository.save(toUpdate);
         }));
 
-        // --- findById() ---
         results.add(bench("findById()", 500, () -> {
             repository.findById(sampleId);
         }));
 
-        // --- all() ---
         results.add(bench("all()", 100, () -> {
             repository.all();
         }));
 
-        // --- query().where(EQ).findFirst() ---
         results.add(bench("query().where(EQ).findFirst()", 200, () -> {
             repository.query().where("name", "BenchProduct50").findFirst();
         }));
 
-        // --- query().where(EQ).findAll() ---
         results.add(bench("query().where(EQ).findAll()", 200, () -> {
             repository.query().where("category", "CatA").findAll();
         }));
 
-        // --- query().where(GT).findAll() ---
         results.add(bench("query().where(GT).findAll()", 200, () -> {
             repository.query().where("price", Operator.GT, 50.0).findAll();
         }));
 
-        // --- query().whereLike().findAll() ---
         results.add(bench("query().whereLike().findAll()", 200, () -> {
             repository.query().whereLike("name", "BenchProduct1%").findAll();
         }));
 
-        // --- query().whereIn().findAll() ---
         results.add(bench("query().whereIn().findAll()", 200, () -> {
             repository.query().whereIn("category", List.of("CatA", "CatB")).findAll();
         }));
 
-        // --- query().orderBy().findAll() ---
         results.add(bench("query().orderBy(price DESC).findAll()", 100, () -> {
             repository.query().orderBy("price", SortOrder.DESC).findAll();
         }));
 
-        // --- query().orderBy().limit().findAll() ---
         results.add(bench("query().orderBy().limit(10).findAll()", 200, () -> {
             repository.query().orderBy("price", SortOrder.DESC).limit(10).findAll();
         }));
 
-        // --- query() combo : where + order + limit ---
         results.add(bench("query() combo (where+order+limit)", 200, () -> {
             repository.query()
                 .where("category", "CatA")
@@ -961,30 +949,25 @@ public class GenericRepositoryTest {
                 .findAll();
         }));
 
-        // --- query().count() ---
         results.add(bench("query().count()", 200, () -> {
             repository.query().where("category", "CatA").count();
         }));
 
-        // --- query().whereRaw() ---
         results.add(bench("query().whereRaw(BETWEEN).findAll()", 200, () -> {
             repository.query()
                 .whereRaw("price BETWEEN :min AND :max", Map.of("min", 20.0, "max", 80.0))
                 .findAll();
         }));
 
-        // --- query().limit().offset() pagination ---
         results.add(bench("query().limit(10).offset(50).findAll()", 200, () -> {
             repository.query().orderBy("id").limit(10).offset(50).findAll();
         }));
 
-        // --- query().delete() ---
         results.add(bench("query().where().delete()", 50, () -> {
             repository.save(new Product("ToDelete", "Trash", 0.0, 0, false));
             repository.query().where("name", "ToDelete").delete();
         }));
 
-        // --- Affichage des resultats ---
         System.out.println("-".repeat(90));
         for (BenchResult r : results) {
             System.out.println(r);

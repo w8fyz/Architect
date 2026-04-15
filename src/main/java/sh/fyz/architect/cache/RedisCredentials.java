@@ -35,4 +35,10 @@ public class RedisCredentials {
     public int getMaxConnections() {
         return maxConnections;
     }
+
+    @Override
+    public String toString() {
+        return "RedisCredentials{host='" + host + "', port=" + port +
+               ", timeout=" + timeout + ", maxConnections=" + maxConnections + "}";
+    }
 }

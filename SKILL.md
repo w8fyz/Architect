@@ -18,7 +18,7 @@ src/main/java/sh/fyz/architect/
 ├── entities/
 │   ├── IdentifiableEntity.java             # Interface: Object getId()
 │   └── DatabaseAction.java                 # Wrapper: entity + Type enum (SAVE, DELETE, NONE)
-├── persistant/
+├── persistent/
 │   ├── DatabaseCredentials.java            # DB config value object
 │   ├── SessionManager.java                 # Hibernate singleton
 │   └── sql/
@@ -153,7 +153,6 @@ Entry point: `repo.query()`. Conditions are ANDed.
 .whereNull("field")
 .whereNotNull("field")
 .whereRaw("HQL fragment", Map.of("param", val)) // raw HQL with named params
-.whereRaw("active = true")                      // raw HQL without params
 .orderBy("field")                               // ASC
 .orderBy("field", SortOrder.DESC)
 .limit(n)

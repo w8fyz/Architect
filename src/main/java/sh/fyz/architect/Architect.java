@@ -3,8 +3,8 @@ package sh.fyz.architect;
 import sh.fyz.architect.cache.RedisCredentials;
 import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.entities.IdentifiableEntity;
-import sh.fyz.architect.persistant.DatabaseCredentials;
-import sh.fyz.architect.persistant.SessionManager;
+import sh.fyz.architect.persistent.DatabaseCredentials;
+import sh.fyz.architect.persistent.SessionManager;
 import sh.fyz.architect.repositories.GenericRepository;
 import sh.fyz.architect.repositories.RepositoryRegistry;
 
@@ -82,18 +82,16 @@ public class Architect {
                 databaseCredentials.getThreadPoolSize(),
                 databaseCredentials.getHbm2ddlAuto()
             );
-        } else {
-            SessionManager.initialize(entityClasses, null, null, null, 1, 10, "update");
         }
     }
 
     public void stop() {
         if (redisCredentials != null) {
-            RedisManager.get().shutdown();
+            RedisManager.reset();
         }
 
-        if (databaseCredentials != null) {
-            SessionManager.get().close();
+        if (SessionManager.isInitialized()) {
+            SessionManager.reset();
         }
 
         RepositoryRegistry.get().clear();

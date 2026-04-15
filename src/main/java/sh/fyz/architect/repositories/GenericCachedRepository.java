@@ -75,6 +75,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         RedisManager.get().delete(key);
         if (RedisManager.get().isReceiver()) {
             updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+        } else {
+            super.delete(entity);
         }
     }
 
@@ -90,7 +92,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
         if (batch.isEmpty()) return;
 
-        try (Session session = sh.fyz.architect.persistant.SessionManager.get().getSession()) {
+        try (Session session = sh.fyz.architect.persistent.SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
                 int count = 0;
@@ -98,7 +100,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     T entity = item.getEntity();
                     switch (item.getType()) {
                         case SAVE -> session.merge(entity);
-                        case DELETE -> session.remove(entity);
+                        case DELETE -> {
+                            Object managed = session.merge(entity);
+                            session.remove(managed);
+                        }
                     }
                     count++;
                     if (count % 20 == 0) {
@@ -108,7 +113,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 }
                 transaction.commit();
             } catch (Exception e) {
-                transaction.rollback();
+                updateQueue.addAll(batch);
                 System.err.println("ERROR: Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
             }
         }
@@ -144,6 +149,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected List<T> executeQuery(QueryBuilder<T> builder) {
+        if (builder.hasRawConditions()) {
+            return super.executeQuery(builder);
+        }
+
         List<T> cached = getAllFromCache();
         if (cached != null && !cached.isEmpty()) {
             Stream<T> stream = cached.stream();
@@ -165,10 +174,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 stream = stream.limit(builder.getLimit());
             }
 
-            List<T> result = stream.collect(Collectors.toList());
-            if (!result.isEmpty()) {
-                return result;
-            }
+            return stream.collect(Collectors.toList());
         }
 
         List<T> dbResults = super.executeQuery(builder);
@@ -184,9 +190,13 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected long executeCount(QueryBuilder<T> builder) {
+        if (builder.hasRawConditions()) {
+            return super.executeCount(builder);
+        }
+
         List<T> cached = getAllFromCache();
         if (cached != null && !cached.isEmpty()) {
-            long count = cached.stream()
+            return cached.stream()
                 .filter(entity -> {
                     for (QueryBuilder.Condition c : builder.getConditions()) {
                         if (!matchesCondition(entity, c)) return false;
@@ -194,7 +204,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     return true;
                 })
                 .count();
-            if (count > 0) return count;
         }
         return super.executeCount(builder);
     }
@@ -262,7 +271,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         String regex = "^" + Pattern.quote(pat)
             .replace("%", "\\E.*\\Q")
             .replace("_", "\\E.\\Q") + "$";
-        return value.matches(regex);
+        return Pattern.compile(regex).matcher(value).matches();
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

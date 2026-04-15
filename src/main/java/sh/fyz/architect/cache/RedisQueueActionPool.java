@@ -1,7 +1,7 @@
 package sh.fyz.architect.cache;
 
 import sh.fyz.architect.entities.DatabaseAction;
-import sh.fyz.architect.persistant.SessionManager;
+import sh.fyz.architect.persistent.SessionManager;
 import sh.fyz.architect.repositories.GenericCachedRepository;
 import sh.fyz.architect.repositories.GenericRepository;
 
@@ -14,20 +14,21 @@ import java.util.AbstractMap;
 
 public class RedisQueueActionPool {
 
-    private final CopyOnWriteArrayList<GenericCachedRepository> queue = new CopyOnWriteArrayList<>();
-    private final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<DatabaseAction, GenericRepository>> pubSubQueue = new ConcurrentLinkedQueue<>();
+    private final CopyOnWriteArrayList<GenericCachedRepository<?>> queue = new CopyOnWriteArrayList<>();
+    private final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>>> pubSubQueue = new ConcurrentLinkedQueue<>();
     private final ExecutorService threadPool;
     private volatile boolean running = true;
 
-    public void add(GenericCachedRepository repository) {
+    public void add(GenericCachedRepository<?> repository) {
         queue.add(repository);
         repository.all();
     }
 
-    public void add(DatabaseAction action, GenericRepository repository) {
+    public void add(DatabaseAction<?> action, GenericRepository<?> repository) {
         pubSubQueue.add(new AbstractMap.SimpleEntry<>(action, repository));
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public RedisQueueActionPool(boolean isReceiver) {
         if (!isReceiver) {
             threadPool = null;
@@ -45,7 +46,7 @@ public class RedisQueueActionPool {
                     }
                     continue;
                 }
-                for (GenericCachedRepository repository : queue) {
+                for (GenericCachedRepository<?> repository : queue) {
                     try {
                         repository.flushUpdates();
                     } catch (Exception e) {
@@ -64,9 +65,9 @@ public class RedisQueueActionPool {
 
         threadPool.submit(() -> {
             while (running && RedisManager.get().isAlive()) {
-                AbstractMap.SimpleEntry<DatabaseAction, GenericRepository> entry;
+                AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>> entry;
                 while ((entry = pubSubQueue.poll()) != null) {
-                    DatabaseAction action = entry.getKey();
+                    DatabaseAction<?> action = entry.getKey();
                     GenericRepository repository = entry.getValue();
                     try {
                         String className = action.getClassName();
