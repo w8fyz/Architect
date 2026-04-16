@@ -91,6 +91,15 @@ public class SessionManager {
                 }
 
                 this.sessionFactory = addEntitiesToConfiguration(configuration).buildSessionFactory();
+
+                String effectiveHbm2ddl = hbm2ddlAuto != null ? hbm2ddlAuto : "update";
+                if ("update".equals(effectiveHbm2ddl)) {
+                    EnumCheckConstraintSynchronizer.synchronize(
+                            this.sessionFactory,
+                            registeredEntityClasses.values(),
+                            authProvider.getDialect()
+                    );
+                }
             }
             this.threadPool = Executors.newVirtualThreadPerTaskExecutor();
         } catch (Exception e) {
