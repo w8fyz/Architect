@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
  * on enum-mapped columns, and replaces them with constraints that reflect the current
  * Java enum definitions.
  */
-class EnumCheckConstraintSynchronizer {
+public class EnumCheckConstraintSynchronizer {
 
     private static final Logger LOG = Logger.getLogger(EnumCheckConstraintSynchronizer.class.getName());
     private static final Pattern QUOTED_VALUE = Pattern.compile("'([^']*)'");
@@ -207,6 +207,37 @@ class EnumCheckConstraintSynchronizer {
             }
         }
         return null;
+    }
+
+    /**
+     * Generates ALTER TABLE ... ADD CONSTRAINT DDL statements for all enum columns
+     * found in the given entity classes. Only produces output for PostgreSQL dialects.
+     */
+    public static List<String> generateEnumConstraintsDDL(Collection<Class<?>> entityClasses, String dialect) {
+        List<String> statements = new ArrayList<>();
+        if (!dialect.toLowerCase().contains("postgresql")) {
+            return statements;
+        }
+
+        List<EnumColumnMapping> mappings = collectEnumMappings(entityClasses);
+        for (EnumColumnMapping mapping : mappings) {
+            String constraintName = mapping.tableName() + "_" + mapping.columnName() + "_check";
+            String checkExpr;
+            if (mapping.enumType() == EnumType.STRING) {
+                String values = Arrays.stream(mapping.enumClass().getEnumConstants())
+                        .map(Enum::name)
+                        .sorted()
+                        .map(v -> "'" + v.replace("'", "''") + "'::character varying")
+                        .collect(Collectors.joining(", "));
+                checkExpr = "(\"" + mapping.columnName() + "\")::text = ANY (ARRAY[" + values + "]::text[])";
+            } else {
+                int max = mapping.enumClass().getEnumConstants().length - 1;
+                checkExpr = "\"" + mapping.columnName() + "\" BETWEEN 0 AND " + max;
+            }
+            statements.add("ALTER TABLE \"" + mapping.tableName() + "\" ADD CONSTRAINT \""
+                    + constraintName + "\" CHECK (" + checkExpr + ")");
+        }
+        return statements;
     }
 
     private static List<Field> getAllFields(Class<?> clazz) {

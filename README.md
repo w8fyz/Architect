@@ -378,6 +378,74 @@ CompletableFuture<Integer> deleted  = query().where("active", false).deleteAsync
 | `IS_NULL` | Is null | `.whereNull("deletedAt")` |
 | `IS_NOT_NULL` | Is not null | `.whereNotNull("email")` |
 
+## Migration System
+
+Architect includes a built-in migration tool to capture your schema as SQL files, execute them, clear the database, or inspect its contents. This is useful for production deployments where `hbm2ddl.auto` should be set to `"none"`.
+
+### Setup
+
+```java
+MigrationManager manager = new MigrationManager(architect, Path.of("./migrations"));
+```
+
+### Create a migration
+
+Generates a full SQL schema snapshot from your entity definitions:
+
+```java
+String ddl = manager.generateSchema();           // preview the DDL
+Path file  = manager.createMigration("v1_init"); // saves to ./migrations/v1_init.sql
+```
+
+### Execute a migration
+
+```java
+manager.executeMigration("v1_init");
+```
+
+Reads the `.sql` file and executes all statements in a single transaction with automatic rollback on error.
+
+### Clear the database
+
+```java
+manager.clearDatabase();
+```
+
+Drops all tables. Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies.
+
+### Inspect the database
+
+```java
+List<TableInfo> tables = manager.listTables();
+TableSchema schema     = manager.getTableSchema("users");
+TableData data         = manager.getTableData("users", 0, 50);
+```
+
+### List migrations
+
+```java
+List<String> files = manager.listMigrations();
+String sql         = manager.readMigrationContent("v1_init");
+```
+
+### GUI (development)
+
+A Swing-based graphical interface is available for interactive use during development:
+
+```java
+MigrationToolGUI.open(architect, Path.of("./migrations"));
+```
+
+This opens a desktop window with tabs for Create, Execute, Clear, and View operations. It runs independently of the application console and does not block the calling thread.
+
+### Production workflow
+
+1. **Development**: use `hbm2ddlAuto = "update"` as usual
+2. **Pre-deploy**: call `manager.createMigration("v1_release")` to snapshot the schema
+3. **Production**: set `hbm2ddlAuto = "none"` and run `manager.executeMigration("v1_release")`
+
+Migrations are full schema snapshots (not incremental). Each `.sql` file creates the complete schema from scratch.
+
 ## Lifecycle
 
 Always shut down Architect when your application stops:

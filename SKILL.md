@@ -21,9 +21,15 @@ src/main/java/sh/fyz/architect/
 ├── persistent/
 │   ├── DatabaseCredentials.java            # DB config value object
 │   ├── SessionManager.java                 # Hibernate singleton
+│   ├── EnumCheckConstraintSynchronizer.java # Syncs enum CHECK constraints on PostgreSQL
 │   └── sql/
 │       ├── SQLAuthProvider.java            # Abstract JDBC provider
 │       └── provider/                       # H2, MariaDB, MySQL, PostgreSQL, SQLite
+├── migration/
+│   ├── MigrationManager.java              # Public API: create, execute, clear, list, inspect
+│   ├── SchemaGenerator.java               # DDL generation via Hibernate metadata
+│   ├── DatabaseInspector.java             # Table/column/data inspection via JDBC
+│   └── MigrationToolGUI.java             # Swing GUI (dev tool, not for programmatic use)
 ├── cache/
 │   ├── RedisCredentials.java               # Redis config value object
 │   ├── RedisManager.java                   # Jedis singleton, keys prefixed architect:
@@ -177,6 +183,79 @@ architect.setRedisCredentials(new RedisCredentials(host, password, port, timeout
 ```
 
 `RedisManager` keys are prefixed `architect:`. On receiver startup, all `architect:*` keys are cleared.
+
+## Migration System
+
+Package: `sh.fyz.architect.migration`. Generates schema snapshots as SQL files from entity definitions, executes them, clears the database, and inspects tables/data.
+
+### MigrationManager
+
+Requires `Architect` to be started first.
+
+```java
+MigrationManager manager = new MigrationManager(architect, Path.of("./migrations"));
+```
+
+#### Generate & create migrations
+
+```java
+String ddl = manager.generateSchema();            // DDL as string (preview)
+Path file  = manager.createMigration("v1_init");  // writes ./migrations/v1_init.sql
+```
+
+The generated SQL is a full schema snapshot (all CREATE TABLE + enum CHECK constraints for PostgreSQL). It reflects the current entity definitions registered in Architect.
+
+#### Execute a migration
+
+```java
+manager.executeMigration("v1_init");  // reads & executes ./migrations/v1_init.sql
+manager.executeSql("ALTER TABLE ...");  // execute arbitrary SQL
+```
+
+Statements are executed in a single transaction with automatic rollback on error.
+
+#### List available migrations
+
+```java
+List<String> files = manager.listMigrations();  // ["v1_init.sql", "v2_add_orders.sql"]
+String content = manager.readMigrationContent("v1_init");  // raw SQL content
+```
+
+#### Clear the database
+
+```java
+manager.clearDatabase();
+```
+
+Drops all tables. Strategy varies by dialect:
+- PostgreSQL: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
+- MySQL/MariaDB: disables FK checks, drops each table, re-enables FK checks
+- H2: `DROP ALL OBJECTS`
+
+#### Inspect the database
+
+```java
+List<TableInfo> tables = manager.listTables();                    // name, columnCount, rowCount
+TableSchema schema     = manager.getTableSchema("users");         // columns, types, PKs, FKs
+TableData data         = manager.getTableData("users", 0, 50);   // paginated rows (max 1000)
+```
+
+Table names are validated against `DatabaseMetaData` to prevent SQL injection.
+
+### Typical production workflow
+
+1. During development: use `hbm2ddlAuto = "update"` as usual
+2. Before deploying: `manager.createMigration("v1_release")` to snapshot the schema
+3. In production: set `hbm2ddlAuto = "none"`, run `manager.executeMigration("v1_release")` on a clean database
+4. Migrations are full snapshots (not incremental diffs like Flyway)
+
+### Key classes
+
+| Class | Role |
+|-------|------|
+| `MigrationManager` | Public API: create, execute, clear, list, inspect |
+| `SchemaGenerator` | DDL generation via Hibernate `SchemaManagementToolCoordinator` + enum constraints |
+| `DatabaseInspector` | Table/column/data inspection via JDBC `DatabaseMetaData` |
 
 ## Key Rules
 

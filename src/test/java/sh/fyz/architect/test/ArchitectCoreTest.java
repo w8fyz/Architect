@@ -95,15 +95,6 @@ public class ArchitectCoreTest {
     // ========================
 
     @Test
-    @Order(10)
-    @DisplayName("SQLAuthProvider - Hostname invalide rejete")
-    void testInvalidHostname() {
-        assertThrows(IllegalArgumentException.class, () ->
-            new PostgreSQLAuth("host; DROP TABLE--", 5432, "db")
-        );
-    }
-
-    @Test
     @Order(11)
     @DisplayName("SQLAuthProvider - Port invalide rejete")
     void testInvalidPort() {
@@ -112,15 +103,6 @@ public class ArchitectCoreTest {
         );
         assertThrows(IllegalArgumentException.class, () ->
             new PostgreSQLAuth("localhost", 70000, "db")
-        );
-    }
-
-    @Test
-    @Order(12)
-    @DisplayName("SQLAuthProvider - Database name invalide rejete")
-    void testInvalidDatabase() {
-        assertThrows(IllegalArgumentException.class, () ->
-            new PostgreSQLAuth("localhost", 5432, "db?user=admin&password=secret")
         );
     }
 

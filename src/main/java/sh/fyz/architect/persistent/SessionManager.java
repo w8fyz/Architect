@@ -26,6 +26,7 @@ public class SessionManager {
     private SessionFactory sessionFactory;
     private final ConcurrentHashMap<String, Class<?>> registeredEntityClasses = new ConcurrentHashMap<>();
     private final ExecutorService threadPool;
+    private SQLAuthProvider authProvider;
 
     private SessionManager(
             List<Class<? extends IdentifiableEntity>> manualEntities,
@@ -37,6 +38,7 @@ public class SessionManager {
             String hbm2ddlAuto
     ) {
         try {
+            this.authProvider = authProvider;
             if (authProvider != null) {
                 Properties settings = new Properties();
                 settings.put(Environment.DRIVER, authProvider.getDriver());
@@ -113,6 +115,14 @@ public class SessionManager {
 
     public boolean isRegisteredEntity(String name) {
         return registeredEntityClasses.containsKey(name);
+    }
+
+    public Collection<Class<?>> getRegisteredEntityClasses() {
+        return Collections.unmodifiableCollection(registeredEntityClasses.values());
+    }
+
+    public SQLAuthProvider getSQLAuthProvider() {
+        return authProvider;
     }
 
     public static void initialize(

@@ -60,6 +60,10 @@ public class Architect {
         return entityClasses;
     }
 
+    public DatabaseCredentials getDatabaseCredentials() {
+        return databaseCredentials;
+    }
+
     public void start() {
         if (redisCredentials != null) {
             RedisManager.initialize(
