@@ -13,14 +13,22 @@ import org.hibernate.Transaction;
 
 import java.lang.reflect.Field;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class GenericCachedRepository<T extends IdentifiableEntity> extends GenericRepository<T> {
+
+    private static final Logger LOG = Logger.getLogger(GenericCachedRepository.class.getName());
+    private static final ConcurrentHashMap<String, Pattern> LIKE_PATTERN_CACHE = new ConcurrentHashMap<>();
+
     private final Class<T> type;
     private final ConcurrentLinkedQueue<DatabaseAction<T>> updateQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedDeque<DatabaseAction<T>> retryQueue = new ConcurrentLinkedDeque<>();
     private final String cacheKeyPrefix;
     private final String allEntitiesKey;
 
@@ -86,6 +94,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     public void flushUpdates() {
         List<DatabaseAction<T>> batch = new ArrayList<>();
+        DatabaseAction<T> retry;
+        while ((retry = retryQueue.pollFirst()) != null) {
+            batch.add(retry);
+        }
         DatabaseAction<T> action;
         while ((action = updateQueue.poll()) != null) {
             batch.add(action);
@@ -113,8 +125,13 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 }
                 transaction.commit();
             } catch (Exception e) {
-                updateQueue.addAll(batch);
-                System.err.println("ERROR: Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                }
+                for (int i = batch.size() - 1; i >= 0; i--) {
+                    retryQueue.addFirst(batch.get(i));
+                }
+                LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
             }
         }
     }
@@ -148,9 +165,9 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     // --- QUERY BUILDER EXECUTION (cache-first) ---
 
     @Override
-    protected List<T> executeQuery(QueryBuilder<T> builder) {
+    protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
         if (builder.hasRawConditions()) {
-            return super.executeQuery(builder);
+            return super.executeQueryWithLimit(builder, explicitLimit);
         }
 
         List<T> cached = getAllFromCache();
@@ -170,14 +187,14 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             if (builder.getOffset() > 0) {
                 stream = stream.skip(builder.getOffset());
             }
-            if (builder.getLimit() > 0) {
-                stream = stream.limit(builder.getLimit());
+            if (explicitLimit > 0) {
+                stream = stream.limit(explicitLimit);
             }
 
             return stream.collect(Collectors.toList());
         }
 
-        List<T> dbResults = super.executeQuery(builder);
+        List<T> dbResults = super.executeQueryWithLimit(builder, explicitLimit);
         if (dbResults != null) {
             for (T entity : dbResults) {
                 if (entity instanceof IdentifiableEntity ie && ie.getId() != null) {
@@ -210,6 +227,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected int executeDelete(QueryBuilder<T> builder) {
+        List<Object> matchedIds = new ArrayList<>();
         List<T> cached = getAllFromCache();
         if (cached != null) {
             for (T entity : cached) {
@@ -221,11 +239,16 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     }
                 }
                 if (matches && entity.getId() != null) {
-                    RedisManager.get().delete(cacheKeyPrefix + entity.getId());
+                    matchedIds.add(entity.getId());
                 }
             }
         }
-        return super.executeDelete(builder);
+
+        int deleted = super.executeDelete(builder);
+        for (Object id : matchedIds) {
+            RedisManager.get().delete(cacheKeyPrefix + id);
+        }
+        return deleted;
     }
 
     // --- IN-MEMORY CONDITION MATCHING ---
@@ -257,7 +280,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             return Double.compare(na.doubleValue(), nb.doubleValue());
         }
 
-        if (a instanceof Comparable ca && b.getClass().isAssignableFrom(a.getClass())) {
+        if (a instanceof Comparable ca && a.getClass().isAssignableFrom(b.getClass())) {
             return ca.compareTo(b);
         }
 
@@ -268,10 +291,13 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         if (fieldValue == null || pattern == null) return false;
         String value = fieldValue.toString();
         String pat = pattern.toString();
-        String regex = "^" + Pattern.quote(pat)
-            .replace("%", "\\E.*\\Q")
-            .replace("_", "\\E.\\Q") + "$";
-        return Pattern.compile(regex).matcher(value).matches();
+        Pattern compiled = LIKE_PATTERN_CACHE.computeIfAbsent(pat, p -> {
+            String regex = "^" + Pattern.quote(p)
+                .replace("%", "\\E.*\\Q")
+                .replace("_", "\\E.\\Q") + "$";
+            return Pattern.compile(regex);
+        });
+        return compiled.matcher(value).matches();
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -310,19 +336,24 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
     }
 
+    /**
+     * Resolves {@code @OneToMany} collections (stored as id lists in Redis). For
+     * {@code @ManyToOne} / {@code @OneToOne}, RedisManager.reconstructEntity already
+     * resolves the referenced entity, so the field may already hold the target entity
+     * (or null). We guard against the historical bug where the field was treated as
+     * holding an ID while actually holding the resolved entity.
+     */
     private T resolveRelations(T entity) {
         try {
             HashMap<Class<?>, GenericRepository<?>> repoCache = new HashMap<>();
             for (Field field : entity.getClass().getDeclaredFields()) {
                 field.setAccessible(true);
                 if (field.isAnnotationPresent(OneToMany.class)) {
-                    Collection<?> ids = (Collection<?>) field.get(entity);
-                    if (ids != null) {
+                    Object raw = field.get(entity);
+                    if (raw instanceof Collection<?> ids && !ids.isEmpty() && isIdCollection(field, ids)) {
                         Collection<Object> resolvedEntities = new ArrayList<>();
                         for (Object id : ids) {
-                            String repositoryName = field.getType().getComponentType() != null
-                                ? field.getType().getComponentType().getSimpleName().toLowerCase() + "s"
-                                : guessRepositoryName(field);
+                            String repositoryName = guessRepositoryName(field);
                             GenericRepository<?> repository = repoCache.computeIfAbsent(
                                     field.getType(),
                                     k -> RepositoryRegistry.get().getRepository(repositoryName)
@@ -338,34 +369,62 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     }
                 } else if (field.isAnnotationPresent(ManyToOne.class) ||
                          field.isAnnotationPresent(OneToOne.class)) {
-                    Object id = field.get(entity);
-                    if (id != null) {
-                        String repositoryName = field.getType().getSimpleName().toLowerCase() + "s";
-                        GenericRepository<?> repository = repoCache.computeIfAbsent(
-                                field.getType(),
-                                k -> RepositoryRegistry.get().getRepository(repositoryName)
-                        );
-                        if (repository != null) {
-                            Object resolvedEntity = repository.findById(id);
-                            if (resolvedEntity != null) {
-                                field.set(entity, resolvedEntity);
-                            }
+                    Object value = field.get(entity);
+                    if (value == null) continue;
+
+                    if (field.getType().isInstance(value)) {
+                        continue;
+                    }
+
+                    String repositoryName = field.getType().getSimpleName().toLowerCase() + "s";
+                    GenericRepository<?> repository = repoCache.computeIfAbsent(
+                            field.getType(),
+                            k -> RepositoryRegistry.get().getRepository(repositoryName)
+                    );
+                    if (repository != null) {
+                        Object resolvedEntity = repository.findById(value);
+                        if (resolvedEntity != null) {
+                            field.set(entity, resolvedEntity);
                         }
                     }
                 }
             }
             return entity;
         } catch (Exception e) {
-            System.err.println("WARN: Failed to resolve relations for " + type.getSimpleName() + ": " + e.getMessage());
+            LOG.warning("Failed to resolve relations for " + type.getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }
 
+    /**
+     * Heuristic: an {@code @OneToMany} collection holds raw IDs (from Redis) if the
+     * first element is not an instance of the field's generic element type.
+     */
+    private boolean isIdCollection(Field field, Collection<?> values) {
+        Class<?> element = resolveCollectionElementType(field);
+        if (element == null) return true;
+        for (Object v : values) {
+            if (v == null) continue;
+            return !element.isInstance(v);
+        }
+        return false;
+    }
+
+    private Class<?> resolveCollectionElementType(Field field) {
+        java.lang.reflect.Type genericType = field.getGenericType();
+        if (genericType instanceof java.lang.reflect.ParameterizedType pt) {
+            java.lang.reflect.Type[] args = pt.getActualTypeArguments();
+            if (args.length == 1 && args[0] instanceof Class<?> c) {
+                return c;
+            }
+        }
+        return null;
+    }
+
     private String guessRepositoryName(Field field) {
-        String typeName = field.getGenericType().getTypeName();
-        if (typeName.contains("<")) {
-            String genericName = typeName.substring(typeName.lastIndexOf(".") + 1, typeName.indexOf(">"));
-            return genericName.toLowerCase() + "s";
+        Class<?> element = resolveCollectionElementType(field);
+        if (element != null) {
+            return element.getSimpleName().toLowerCase() + "s";
         }
         return field.getName();
     }

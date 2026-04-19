@@ -6,8 +6,11 @@ import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
 
 import java.util.List;
+import java.util.logging.Logger;
 
 public class GenericRelayRepository<T extends IdentifiableEntity> extends GenericCachedRepository<T> {
+
+    private static final Logger LOG = Logger.getLogger(GenericRelayRepository.class.getName());
 
     private EntityChannelPubSub<T> channelPubSub;
 
@@ -34,7 +37,7 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
         try {
             return super.findById(id);
         } catch (Exception e) {
-            System.err.println("WARN: Failed to find entity by ID in relay repository: " + e.getMessage());
+            LOG.warning("Failed to find entity by ID in relay repository: " + e.getMessage());
             return null;
         }
     }
@@ -52,7 +55,7 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
         try {
             return super.all();
         } catch (Exception e) {
-            System.err.println("WARN: Failed to list all entities in relay repository: " + e.getMessage());
+            LOG.warning("Failed to list all entities in relay repository: " + e.getMessage());
             return List.of();
         }
     }

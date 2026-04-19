@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.1.0'
+    implementation 'sh.fyz:Architect:2.2.0'
 }
 ```
 
@@ -24,7 +24,7 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 ```
 
@@ -126,6 +126,19 @@ architect.start();
 | `H2Auth` | `(host, port, database)` |
 | `SQLiteAuth` | `(databasePath)` |
 
+Hostname and database identifiers are validated against `[A-Za-z0-9._-]` to prevent JDBC URL injection. SQLite paths are normalized and reject URL schemes / illegal characters.
+
+#### TLS
+
+All network providers (PostgreSQL, MySQL, MariaDB, H2) accept a fluent `withTls(TlsMode)` call. SQLite is local-only and rejects TLS configuration.
+
+```java
+new PostgreSQLAuth("db.example.com", 5432, "app").withTls(TlsMode.REQUIRE)
+new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
+```
+
+`TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters.
+
 ### DatabaseCredentials
 
 ```java
@@ -137,6 +150,18 @@ new DatabaseCredentials(provider, user, password, poolSize, threadPoolSize, hbm2
 ```
 
 `hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"validate"`, `"none"`.
+
+> **Production**: always use `"none"` and manage schema changes through the migration system below. `"update"` is convenient for development but is not safe to run against a live database.
+
+### Redis TTL
+
+`RedisCredentials` accepts an optional default TTL (seconds) applied to every cached entity. `0` (default) means no expiry. Set a positive value in production to cap memory usage:
+
+```java
+new RedisCredentials("localhost", "password", 6379, 2000, 10, /* defaultTtlSeconds */ 3600)
+```
+
+Per-key TTL overrides are still possible via `RedisManager.get().setTTL(key, seconds)`.
 
 ## Repositories
 
@@ -408,10 +433,10 @@ Reads the `.sql` file and executes all statements in a single transaction with a
 ### Clear the database
 
 ```java
-manager.clearDatabase();
+manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION); // "CONFIRM_DROP_ALL"
 ```
 
-Drops all tables. Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies.
+Drops all tables. Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies. The confirmation token is required to prevent accidental destructive calls. The no-argument overload is `@Deprecated` and logs a warning; it will be removed in a future major release.
 
 ### Inspect the database
 
@@ -455,6 +480,17 @@ architect.stop();
 ```
 
 This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis.
+
+## What's new in 2.2.0
+
+Non-breaking security and integrity hardening:
+
+- **Security**: JDBC URL injection closed (`SQLAuthProvider` whitelists hostnames/databases, `SQLiteAuth` normalizes paths and rejects URL schemes), new `withTls(TlsMode)` on every network provider, path-traversal guard on `MigrationManager.executeMigration` / `readMigrationContent`, `clearDatabase(String confirmation)` requires a `"CONFIRM_DROP_ALL"` token, `parseSqlStatements` now correctly handles PostgreSQL dollar-quoted strings (`$$` / `$tag$`).
+- **Cache integrity**: `executeDelete` now hits the database before invalidating the cache (so a DB failure no longer wipes the cache), `flushUpdates` rolls back the transaction and re-enqueues the failed batch in order, `RedisManager.reconstructEntity` and `GenericCachedRepository.resolveRelations` no longer double-resolve `@ManyToOne` / `@OneToOne` relations.
+- **Pub/sub**: `EntityChannelPubSub` now reconnects automatically with exponential backoff on `JedisException` instead of dying silently.
+- **Concurrency**: `GenericRepository` resolves the thread pool from `SessionManager` on every call (no stale reference after `stop()` / `start()`), `QueryBuilder.findFirst()` no longer mutates the builder's `limit` (thread-safe), `delete(entity)` uses `session.merge()` so detached entities can be removed.
+- **Lifecycle**: `Architect.start()` is now idempotent and rolls back Redis init if the database init throws; `SessionManager.getSession()` rejects calls on a closed factory.
+- **Quality**: `RedisCredentials.defaultTtlSeconds`, cached `LIKE` `Pattern`s, fixed direction of `compareValues`'s `isAssignableFrom`, redacted JDBC URL in init exceptions, `System.err.println` replaced with `java.util.logging` everywhere, deprecated `whereRaw(String)` removed (use the `Map<String,Object>` overload), Swing `MigrationToolDemo` moved to a dedicated `examples` source set, tests modernized with Awaitility.
 
 ## License
 

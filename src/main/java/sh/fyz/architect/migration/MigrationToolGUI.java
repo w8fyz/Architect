@@ -310,11 +310,11 @@ public class MigrationToolGUI {
         warningText.setAlignmentX(Component.CENTER_ALIGNMENT);
         warningText.setHorizontalAlignment(SwingConstants.CENTER);
 
-        JLabel instructionLabel = new JLabel("Type CLEAR to confirm:");
+        JLabel instructionLabel = new JLabel("Type " + MigrationManager.CLEAR_CONFIRMATION + " to confirm:");
         instructionLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        JTextField confirmField = new JTextField(10);
-        confirmField.setMaximumSize(new Dimension(200, 30));
+        JTextField confirmField = new JTextField(20);
+        confirmField.setMaximumSize(new Dimension(320, 30));
         confirmField.setAlignmentX(Component.CENTER_ALIGNMENT);
         confirmField.setHorizontalAlignment(JTextField.CENTER);
 
@@ -330,7 +330,7 @@ public class MigrationToolGUI {
         confirmField.addKeyListener(new KeyAdapter() {
             @Override
             public void keyReleased(KeyEvent e) {
-                clearBtn.setEnabled("CLEAR".equals(confirmField.getText()));
+                clearBtn.setEnabled(MigrationManager.CLEAR_CONFIRMATION.equals(confirmField.getText()));
             }
         });
 
@@ -342,7 +342,7 @@ public class MigrationToolGUI {
             new SwingWorker<Void, Void>() {
                 @Override
                 protected Void doInBackground() {
-                    manager.clearDatabase();
+                    manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION);
                     return null;
                 }
 

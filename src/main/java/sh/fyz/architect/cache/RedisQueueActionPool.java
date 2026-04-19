@@ -11,8 +11,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.AbstractMap;
+import java.util.logging.Logger;
 
 public class RedisQueueActionPool {
+
+    private static final Logger LOG = Logger.getLogger(RedisQueueActionPool.class.getName());
 
     private final CopyOnWriteArrayList<GenericCachedRepository<?>> queue = new CopyOnWriteArrayList<>();
     private final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>>> pubSubQueue = new ConcurrentLinkedQueue<>();
@@ -50,7 +53,7 @@ public class RedisQueueActionPool {
                     try {
                         repository.flushUpdates();
                     } catch (Exception e) {
-                        System.err.println("ERROR: Error flushing updates for repository: " + e.getMessage());
+                        LOG.warning("Error flushing updates for repository: " + e.getMessage());
                     }
                 }
 
@@ -72,7 +75,7 @@ public class RedisQueueActionPool {
                     try {
                         String className = action.getClassName();
                         if (!SessionManager.get().isRegisteredEntity(className)) {
-                            System.err.println("WARN: Rejected action with unknown entity class: " + className);
+                            LOG.warning("Rejected action with unknown entity class: " + className);
                             continue;
                         }
                         Class<?> entityClass = SessionManager.get().getEntityClass(className);
@@ -83,7 +86,7 @@ public class RedisQueueActionPool {
                             case DELETE -> repository.delete(entity);
                         }
                     } catch (Exception e) {
-                        System.err.println("ERROR: Error processing pub/sub action: " + e.getMessage());
+                        LOG.warning("Error processing pub/sub action: " + e.getMessage());
                     }
                 }
                 try {

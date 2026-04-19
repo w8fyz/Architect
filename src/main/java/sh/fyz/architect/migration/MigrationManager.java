@@ -21,6 +21,7 @@ import java.util.stream.Stream;
 public class MigrationManager {
 
     private static final Logger LOG = Logger.getLogger(MigrationManager.class.getName());
+    public static final String CLEAR_CONFIRMATION = "CONFIRM_DROP_ALL";
 
     private final SchemaGenerator schemaGenerator;
     private final DatabaseInspector databaseInspector;
@@ -52,7 +53,7 @@ public class MigrationManager {
 
         try {
             Files.createDirectories(migrationDirectory);
-            Path file = migrationDirectory.resolve(safeName + ".sql");
+            Path file = resolveMigrationFile(safeName);
             Files.writeString(file, ddl);
             LOG.info("Migration created: " + file.toAbsolutePath());
             return file;
@@ -62,8 +63,7 @@ public class MigrationManager {
     }
 
     public void executeMigration(String name) {
-        String safeName = name.endsWith(".sql") ? name : name + ".sql";
-        Path file = migrationDirectory.resolve(safeName);
+        Path file = resolveMigrationFile(name);
         if (!Files.exists(file)) {
             throw new IllegalArgumentException("Migration file not found: " + file.toAbsolutePath());
         }
@@ -107,7 +107,30 @@ public class MigrationManager {
         }
     }
 
+    /**
+     * @deprecated Use {@link #clearDatabase(String)} with the confirmation token to avoid
+     *             accidental destructive calls.
+     */
+    @Deprecated
     public void clearDatabase() {
+        LOG.warning("clearDatabase() called without confirmation token. Use clearDatabase(\"" + CLEAR_CONFIRMATION + "\") instead.");
+        doClearDatabase();
+    }
+
+    /**
+     * Drops every table (or schema) in the database. Requires the exact confirmation
+     * token {@code CONFIRM_DROP_ALL} to prevent accidental destructive calls.
+     */
+    public void clearDatabase(String confirmation) {
+        if (!CLEAR_CONFIRMATION.equals(confirmation)) {
+            throw new IllegalArgumentException(
+                "clearDatabase requires confirmation token \"" + CLEAR_CONFIRMATION + "\""
+            );
+        }
+        doClearDatabase();
+    }
+
+    private void doClearDatabase() {
         try (Session session = SessionManager.get().getSession()) {
             session.doWork(this::doClear);
         }
@@ -176,8 +199,7 @@ public class MigrationManager {
     }
 
     public String readMigrationContent(String name) {
-        String safeName = name.endsWith(".sql") ? name : name + ".sql";
-        Path file = migrationDirectory.resolve(safeName);
+        Path file = resolveMigrationFile(name);
         if (!Files.exists(file)) {
             throw new IllegalArgumentException("Migration file not found: " + file.toAbsolutePath());
         }
@@ -204,6 +226,31 @@ public class MigrationManager {
         return migrationDirectory;
     }
 
+    /**
+     * Resolves {@code name} against the migration directory and ensures the resulting
+     * path cannot escape it (protection against path-traversal like {@code ../../etc/passwd}).
+     */
+    private Path resolveMigrationFile(String name) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Migration name must not be null or blank");
+        }
+        String safeName = name.endsWith(".sql") ? name : name + ".sql";
+        Path baseAbs = migrationDirectory.toAbsolutePath().normalize();
+        Path resolved = baseAbs.resolve(safeName).normalize();
+        if (!resolved.startsWith(baseAbs)) {
+            throw new IllegalArgumentException(
+                "Migration path escapes migration directory: " + name
+            );
+        }
+        return resolved;
+    }
+
+    /**
+     * Splits a SQL script into individual statements at top-level semicolons.
+     * Respects single-quoted strings, double-quoted identifiers, line ({@code --})
+     * and block ({@code / * ... * /}) comments, and PostgreSQL dollar-quoted
+     * string literals ({@code $$...$$} or {@code $tag$...$tag$}).
+     */
     private List<String> parseSqlStatements(String sql) {
         List<String> statements = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -211,14 +258,26 @@ public class MigrationManager {
         boolean inDoubleQuote = false;
         boolean inLineComment = false;
         boolean inBlockComment = false;
+        String dollarTag = null;
 
         for (int i = 0; i < sql.length(); i++) {
             char c = sql.charAt(i);
             char next = (i + 1 < sql.length()) ? sql.charAt(i + 1) : 0;
 
+            if (dollarTag != null) {
+                current.append(c);
+                if (c == '$' && sql.startsWith(dollarTag, i)) {
+                    current.append(sql, i + 1, i + dollarTag.length());
+                    i += dollarTag.length() - 1;
+                    dollarTag = null;
+                }
+                continue;
+            }
+
             if (inLineComment) {
                 if (c == '\n') {
                     inLineComment = false;
+                    current.append(c);
                 }
                 continue;
             }
@@ -247,6 +306,14 @@ public class MigrationManager {
                 inSingleQuote = !inSingleQuote;
             } else if (c == '"' && !inSingleQuote) {
                 inDoubleQuote = !inDoubleQuote;
+            } else if (c == '$' && !inSingleQuote && !inDoubleQuote) {
+                String tag = tryReadDollarTag(sql, i);
+                if (tag != null) {
+                    current.append(tag);
+                    i += tag.length() - 1;
+                    dollarTag = tag;
+                    continue;
+                }
             }
 
             if (c == ';' && !inSingleQuote && !inDoubleQuote) {
@@ -266,5 +333,26 @@ public class MigrationManager {
         }
 
         return statements;
+    }
+
+    /**
+     * If the character at {@code start} is {@code $} and starts a valid dollar-quote
+     * opener ({@code $$} or {@code $identifier$}), returns the full tag including the
+     * surrounding dollar signs. Returns {@code null} otherwise.
+     */
+    private static String tryReadDollarTag(String sql, int start) {
+        if (sql.charAt(start) != '$') return null;
+        int i = start + 1;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (c == '$') {
+                return sql.substring(start, i + 1);
+            }
+            if (!(Character.isLetterOrDigit(c) || c == '_')) {
+                return null;
+            }
+            i++;
+        }
+        return null;
     }
 }

@@ -1,6 +1,10 @@
 package sh.fyz.architect.persistent.sql;
 
+import java.util.regex.Pattern;
+
 public abstract class SQLAuthProvider {
+
+    private static final Pattern SAFE_IDENT = Pattern.compile("[A-Za-z0-9._\\-]+");
 
     public abstract String getDialect();
 
@@ -9,14 +13,24 @@ public abstract class SQLAuthProvider {
     public abstract String getUrl();
 
     protected static void validateHost(String hostname) {
-        if (hostname == null) {
-            throw new IllegalArgumentException("Invalid hostname: hostname cannot be null");
+        if (hostname == null || hostname.isBlank()) {
+            throw new IllegalArgumentException("Invalid hostname: must not be null or blank");
+        }
+        if (!SAFE_IDENT.matcher(hostname).matches()) {
+            throw new IllegalArgumentException(
+                "Invalid hostname: only [A-Za-z0-9._-] characters are allowed (got: '" + hostname + "')"
+            );
         }
     }
 
     protected static void validateDatabase(String database) {
-        if (database == null) {
-            throw new IllegalArgumentException("Invalid database name: database name cannot be null");
+        if (database == null || database.isBlank()) {
+            throw new IllegalArgumentException("Invalid database name: must not be null or blank");
+        }
+        if (!SAFE_IDENT.matcher(database).matches()) {
+            throw new IllegalArgumentException(
+                "Invalid database name: only [A-Za-z0-9._-] characters are allowed (got: '" + database + "')"
+            );
         }
     }
 

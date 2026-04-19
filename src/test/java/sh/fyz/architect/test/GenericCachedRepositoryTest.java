@@ -1,5 +1,6 @@
 package sh.fyz.architect.test;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.*;
 import sh.fyz.architect.Architect;
 import sh.fyz.architect.cache.RedisCredentials;
@@ -9,6 +10,7 @@ import sh.fyz.architect.repositories.GenericCachedRepository;
 import sh.fyz.architect.repositories.QueryBuilder.Operator;
 import sh.fyz.architect.repositories.QueryBuilder.SortOrder;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class GenericCachedRepositoryTest {
+
+    private static final Duration AWAIT = Duration.ofSeconds(5);
 
     private Architect architect;
     private GenericCachedRepository<Product> repository;
@@ -56,9 +60,8 @@ public class GenericCachedRepositoryTest {
     }
 
     @BeforeEach
-    void cleanData() throws InterruptedException {
+    void cleanData() {
         repository.flushUpdates();
-        Thread.sleep(300);
 
         try (var session = sh.fyz.architect.persistent.SessionManager.get().getSession()) {
             var tx = session.beginTransaction();
@@ -72,7 +75,6 @@ public class GenericCachedRepositoryTest {
                 jedis.del(keys.toArray(new String[0]));
             }
         }
-        Thread.sleep(100);
     }
 
     // --- SAVE ---
@@ -106,16 +108,17 @@ public class GenericCachedRepositoryTest {
     @Test
     @Order(3)
     @DisplayName("save() - Flush vers la base de donnees")
-    void testSaveFlushToDb() throws InterruptedException {
+    void testSaveFlushToDb() {
         Product saved = repository.save(new Product("FlushTest", "Cat", 10.0, 1, true));
         assertNotNull(saved.getId());
 
         repository.flushUpdates();
-        Thread.sleep(100);
 
-        Product fromCache = repository.findById(saved.getId());
-        assertNotNull(fromCache);
-        assertEquals("FlushTest", fromCache.getName());
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            Product fromCache = repository.findById(saved.getId());
+            assertNotNull(fromCache);
+            assertEquals("FlushTest", fromCache.getName());
+        });
     }
 
     // --- FIND BY ID ---
@@ -144,17 +147,20 @@ public class GenericCachedRepositoryTest {
     @Test
     @Order(20)
     @DisplayName("delete() - Supprime du cache et persiste (receiver)")
-    void testDeleteReceiver() throws InterruptedException {
+    void testDeleteReceiver() {
         Product saved = repository.save(new Product("ToDelete", "Cat", 5.0, 1, true));
         repository.flushUpdates();
-        Thread.sleep(100);
+
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            assertNotNull(repository.findById(saved.getId()));
+        });
 
         repository.delete(saved);
         repository.flushUpdates();
-        Thread.sleep(100);
 
-        Product found = repository.findById(saved.getId());
-        assertNull(found);
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            assertNull(repository.findById(saved.getId()));
+        });
     }
 
     // --- ALL ---
@@ -351,12 +357,15 @@ public class GenericCachedRepositoryTest {
     @Test
     @Order(70)
     @DisplayName("query().delete() - Suppression avec condition")
-    void testQueryDelete() throws InterruptedException {
+    void testQueryDelete() {
         repository.save(new Product("Keep1", "Good", 10.0, 1, true));
         repository.save(new Product("Keep2", "Good", 20.0, 1, true));
         repository.save(new Product("Remove1", "Bad", 5.0, 1, false));
         repository.flushUpdates();
-        Thread.sleep(200);
+
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            assertEquals(3, repository.all().size());
+        });
 
         int deleted = repository.query()
             .where("category", "Bad")
@@ -370,18 +379,18 @@ public class GenericCachedRepositoryTest {
     @Test
     @Order(80)
     @DisplayName("query().whereRaw() - Fallback vers la DB (pas d'eval en memoire)")
-    void testQueryWhereRawFallsBackToDb() throws InterruptedException {
+    void testQueryWhereRawFallsBackToDb() {
         repository.save(new Product("Clavier", "Cat", 50.0, 1, true));
         repository.save(new Product("CLAVIER", "Cat", 30.0, 1, true));
         repository.save(new Product("Souris", "Cat", 20.0, 1, true));
         repository.flushUpdates();
-        Thread.sleep(200);
 
-        List<Product> result = repository.query()
-            .whereRaw("LOWER(name) = :val", java.util.Map.of("val", "clavier"))
-            .findAll();
-
-        assertEquals(2, result.size());
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            List<Product> result = repository.query()
+                .whereRaw("LOWER(name) = :val", java.util.Map.of("val", "clavier"))
+                .findAll();
+            assertEquals(2, result.size());
+        });
     }
 
     // --- COMBO ---
@@ -447,15 +456,16 @@ public class GenericCachedRepositoryTest {
     @Test
     @Order(101)
     @DisplayName("flushUpdates() - Plusieurs save puis flush")
-    void testFlushUpdatesMultipleSaves() throws InterruptedException {
+    void testFlushUpdatesMultipleSaves() {
         for (int i = 0; i < 25; i++) {
             repository.save(new Product("Batch" + i, "Cat", i * 5.0, i, true));
         }
 
         repository.flushUpdates();
-        Thread.sleep(200);
 
-        List<Product> all = repository.all();
-        assertEquals(25, all.size());
+        Awaitility.await().atMost(AWAIT).untilAsserted(() -> {
+            List<Product> all = repository.all();
+            assertEquals(25, all.size());
+        });
     }
 }

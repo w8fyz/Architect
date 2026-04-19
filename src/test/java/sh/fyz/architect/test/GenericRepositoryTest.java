@@ -639,14 +639,13 @@ public class GenericRepositoryTest {
 
     @Test
     @Order(113)
-    @DisplayName("query().whereRaw() - Sans parametres")
-    @SuppressWarnings("deprecation")
+    @DisplayName("query().whereRaw() - Sans parametres (utilise un Map vide)")
     void testQueryWhereRawNoParams() {
         repository.save(new Product("Active", "Cat", 10.0, 1, true));
         repository.save(new Product("Inactive", "Cat", 20.0, 1, false));
 
         List<Product> result = repository.query()
-            .whereRaw("active = true")
+            .whereRaw("active = true", java.util.Map.of())
             .findAll();
 
         assertEquals(1, result.size());

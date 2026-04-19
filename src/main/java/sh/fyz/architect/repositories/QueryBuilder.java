@@ -91,22 +91,6 @@ public class QueryBuilder<T> {
         return this;
     }
 
-    /**
-     * Adds a raw HQL WHERE fragment without parameters.
-     *
-     * <p><b>WARNING: Never pass user-controlled input directly to this method.</b>
-     * The HQL fragment is inserted as-is into the query, which can lead to HQL injection
-     * if user input is concatenated into the fragment. Use {@link #whereRaw(String, Map)}
-     * with named parameters instead.</p>
-     *
-     * @deprecated Use {@link #whereRaw(String, Map)} with named parameters instead to prevent HQL injection.
-     */
-    @Deprecated
-    public QueryBuilder<T> whereRaw(String hqlFragment) {
-        rawConditions.add(new RawCondition(hqlFragment, Map.of()));
-        return this;
-    }
-
     // --- ORDER BY ---
 
     public QueryBuilder<T> orderBy(String field) {
@@ -140,10 +124,7 @@ public class QueryBuilder<T> {
     }
 
     public T findFirst() {
-        int previousLimit = this.limit;
-        this.limit = 1;
-        List<T> results = repository.executeQuery(this);
-        this.limit = previousLimit;
+        List<T> results = repository.executeQueryWithLimit(this, 1);
         return results.isEmpty() ? null : results.get(0);
     }
 
@@ -158,19 +139,19 @@ public class QueryBuilder<T> {
     // --- TERMINAL OPERATIONS (async) ---
 
     public CompletableFuture<List<T>> findAllAsync() {
-        return CompletableFuture.supplyAsync(this::findAll, repository.threadPool);
+        return CompletableFuture.supplyAsync(this::findAll, repository.threadPool());
     }
 
     public CompletableFuture<T> findFirstAsync() {
-        return CompletableFuture.supplyAsync(this::findFirst, repository.threadPool);
+        return CompletableFuture.supplyAsync(this::findFirst, repository.threadPool());
     }
 
     public CompletableFuture<Long> countAsync() {
-        return CompletableFuture.supplyAsync(this::count, repository.threadPool);
+        return CompletableFuture.supplyAsync(this::count, repository.threadPool());
     }
 
     public CompletableFuture<Integer> deleteAsync() {
-        return CompletableFuture.supplyAsync(this::delete, repository.threadPool);
+        return CompletableFuture.supplyAsync(this::delete, repository.threadPool());
     }
 
     // --- PACKAGE-PRIVATE ACCESSORS ---

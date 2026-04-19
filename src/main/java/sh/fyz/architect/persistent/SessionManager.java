@@ -20,6 +20,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class SessionManager {
+
+    private static final Logger LOG = Logger.getLogger(SessionManager.class.getName());
     private static volatile SessionManager instance;
     private static final Object LOCK = new Object();
 
@@ -37,12 +39,13 @@ public class SessionManager {
             int threadPoolSize,
             String hbm2ddlAuto
     ) {
+        String jdbcUrl = authProvider != null ? authProvider.getUrl() : null;
         try {
             this.authProvider = authProvider;
             if (authProvider != null) {
                 Properties settings = new Properties();
                 settings.put(Environment.DRIVER, authProvider.getDriver());
-                settings.put(Environment.URL, authProvider.getUrl());
+                settings.put(Environment.URL, jdbcUrl);
                 settings.put(Environment.USER, user);
                 settings.put(Environment.PASS, password);
                 settings.put(Environment.DIALECT, authProvider.getDialect());
@@ -105,8 +108,15 @@ public class SessionManager {
             }
             this.threadPool = Executors.newVirtualThreadPerTaskExecutor();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize Hibernate", e);
+            LOG.log(Level.SEVERE, "Hibernate initialization failed", e);
+            throw new RuntimeException("Failed to initialize Hibernate: " + redact(e.getMessage(), jdbcUrl));
         }
+    }
+
+    private static String redact(String message, String jdbcUrl) {
+        if (message == null) return "<no message>";
+        if (jdbcUrl == null || jdbcUrl.isEmpty()) return message;
+        return message.replace(jdbcUrl, "[redacted-jdbc-url]");
     }
 
     public Class<?> getEntityClass(String name) {
@@ -172,6 +182,9 @@ public class SessionManager {
         if (sessionFactory == null) {
             throw new IllegalStateException("SessionFactory is not available. No database credentials were provided.");
         }
+        if (sessionFactory.isClosed()) {
+            throw new IllegalStateException("SessionFactory is closed. Architect has been stopped.");
+        }
         return sessionFactory.openSession();
     }
 
@@ -214,7 +227,7 @@ public class SessionManager {
                 try {
                     entityClasses.add(Class.forName(classInfo.getName()));
                 } catch (ClassNotFoundException e) {
-                    System.err.println("WARN: Failed to load entity class: " + classInfo.getName());
+                    LOG.warning("Failed to load entity class: " + classInfo.getName());
                 }
             });
         }

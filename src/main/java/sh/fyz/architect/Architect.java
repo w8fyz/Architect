@@ -10,6 +10,7 @@ import sh.fyz.architect.repositories.RepositoryRegistry;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Architect {
 
@@ -17,6 +18,7 @@ public class Architect {
     private DatabaseCredentials databaseCredentials;
     private boolean isReceiver = true;
     private final List<Class<? extends IdentifiableEntity>> entityClasses = new ArrayList<>();
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     public Architect() {
     }
@@ -64,33 +66,59 @@ public class Architect {
         return databaseCredentials;
     }
 
+    public boolean isStarted() {
+        return started.get();
+    }
+
     public void start() {
-        if (redisCredentials != null) {
-            RedisManager.initialize(
-                redisCredentials.getHost(),
-                redisCredentials.getPassword(),
-                redisCredentials.getPort(),
-                redisCredentials.getTimeout(),
-                redisCredentials.getMaxConnections(),
-                isReceiver
-            );
+        if (!started.compareAndSet(false, true)) {
+            return;
         }
 
-        if (databaseCredentials != null) {
-            SessionManager.initialize(
-                entityClasses,
-                databaseCredentials.getSQLAuthProvider(),
-                databaseCredentials.getUser(),
-                databaseCredentials.getPassword(),
-                databaseCredentials.getPoolSize(),
-                databaseCredentials.getThreadPoolSize(),
-                databaseCredentials.getHbm2ddlAuto()
-            );
+        boolean redisInitialized = false;
+        try {
+            if (redisCredentials != null) {
+                RedisManager.initialize(
+                    redisCredentials.getHost(),
+                    redisCredentials.getPassword(),
+                    redisCredentials.getPort(),
+                    redisCredentials.getTimeout(),
+                    redisCredentials.getMaxConnections(),
+                    isReceiver,
+                    redisCredentials.getDefaultTtlSeconds()
+                );
+                redisInitialized = true;
+            }
+
+            if (databaseCredentials != null) {
+                SessionManager.initialize(
+                    entityClasses,
+                    databaseCredentials.getSQLAuthProvider(),
+                    databaseCredentials.getUser(),
+                    databaseCredentials.getPassword(),
+                    databaseCredentials.getPoolSize(),
+                    databaseCredentials.getThreadPoolSize(),
+                    databaseCredentials.getHbm2ddlAuto()
+                );
+            }
+        } catch (RuntimeException e) {
+            if (redisInitialized && RedisManager.isInitialized()) {
+                try {
+                    RedisManager.reset();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            started.set(false);
+            throw e;
         }
     }
 
     public void stop() {
-        if (redisCredentials != null) {
+        if (!started.compareAndSet(true, false)) {
+            return;
+        }
+
+        if (redisCredentials != null && RedisManager.isInitialized()) {
             RedisManager.reset();
         }
 

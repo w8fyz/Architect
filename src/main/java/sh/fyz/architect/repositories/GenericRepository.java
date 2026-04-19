@@ -16,18 +16,25 @@ import java.util.function.Consumer;
 
 public class GenericRepository<T> {
     protected final Class<T> type;
-    protected final ExecutorService threadPool;
 
     private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, Field> ID_FIELD_CACHE = new ConcurrentHashMap<>();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
-        this.threadPool = SessionManager.get().getThreadPool();
     }
 
     public Class<T> getEntityClass() {
         return type;
+    }
+
+    /**
+     * Resolves the current session thread pool on each call. This avoids keeping a
+     * stale reference after {@code architect.stop()} / {@code start()}, which used to
+     * throw {@link java.util.concurrent.RejectedExecutionException} on async operations.
+     */
+    protected ExecutorService threadPool() {
+        return SessionManager.get().getThreadPool();
     }
 
     // --- QUERY BUILDER ENTRY POINT ---
@@ -109,14 +116,16 @@ public class GenericRepository<T> {
                 transaction.commit();
                 return savedEntity;
             } catch (Exception e) {
-                transaction.rollback();
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                }
                 throw new RuntimeException("Failed to save entity: " + e.getMessage(), e);
             }
         }
     }
 
     public void saveAsync(T entity, Consumer<T> callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
+        threadPool().submit(() -> {
             try {
                 T savedEntity = save(entity);
                 callback.accept(savedEntity);
@@ -133,7 +142,7 @@ public class GenericRepository<T> {
     }
 
     public void findByIdAsync(Object id, Consumer<T> callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
+        threadPool().submit(() -> {
             try {
                 T entity = findById(id);
                 callback.accept(entity);
@@ -150,7 +159,7 @@ public class GenericRepository<T> {
     }
 
     public void allAsync(Consumer<List<T>> callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
+        threadPool().submit(() -> {
             try {
                 List<T> entities = all();
                 callback.accept(entities);
@@ -164,17 +173,20 @@ public class GenericRepository<T> {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
-                session.remove(entity);
+                Object managed = session.merge(entity);
+                session.remove(managed);
                 transaction.commit();
             } catch (Exception e) {
-                transaction.rollback();
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                }
                 throw new RuntimeException("Failed to delete entity: " + e.getMessage(), e);
             }
         }
     }
 
     public void deleteAsync(T entity, Runnable callback, Consumer<Exception> errorCallback) {
-        threadPool.submit(() -> {
+        threadPool().submit(() -> {
             try {
                 delete(entity);
                 callback.run();
@@ -187,6 +199,15 @@ public class GenericRepository<T> {
     // --- QUERY BUILDER EXECUTION (overridable by subclasses) ---
 
     protected List<T> executeQuery(QueryBuilder<T> builder) {
+        return executeQueryWithLimit(builder, builder.getLimit());
+    }
+
+    /**
+     * Executes a query with an explicit limit override. Used by {@link QueryBuilder#findFirst()}
+     * to request a single row without mutating the builder's state (which would be unsafe
+     * for concurrent callers).
+     */
+    protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
         validateQueryFields(builder);
 
         try (Session session = SessionManager.get().getSession()) {
@@ -194,8 +215,8 @@ public class GenericRepository<T> {
             Query<T> query = session.createQuery(hql, type);
             bindParameters(query, builder);
 
-            if (builder.getLimit() > 0) {
-                query.setMaxResults(builder.getLimit());
+            if (explicitLimit > 0) {
+                query.setMaxResults(explicitLimit);
             }
             if (builder.getOffset() > 0) {
                 query.setFirstResult(builder.getOffset());
@@ -234,7 +255,9 @@ public class GenericRepository<T> {
                 transaction.commit();
                 return deleted;
             } catch (Exception e) {
-                transaction.rollback();
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                }
                 throw new RuntimeException("Failed to execute delete query: " + e.getMessage(), e);
             }
         }

@@ -231,7 +231,7 @@ public class MigrationTest {
     @Order(50)
     @DisplayName("clearDatabase() vide toutes les tables")
     void testClearDatabase() {
-        assertDoesNotThrow(() -> manager.clearDatabase());
+        assertDoesNotThrow(() -> manager.clearDatabase(sh.fyz.architect.migration.MigrationManager.CLEAR_CONFIRMATION));
         List<DatabaseInspector.TableInfo> tables = manager.listTables();
         assertTrue(tables.isEmpty(), "All tables should be dropped after clearDatabase()");
     }

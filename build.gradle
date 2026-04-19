@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'sh.fyz'
-version = '2.1.2'
+version = '2.2.0'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_21
@@ -28,6 +28,21 @@ repositories {
     mavenCentral()
 }
 
+sourceSets {
+    examples {
+        java {
+            srcDir 'src/examples/java'
+        }
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+configurations {
+    examplesImplementation.extendsFrom implementation, api
+    examplesRuntimeOnly.extendsFrom runtimeOnly
+}
+
 dependencies {
     api "org.hibernate.orm:hibernate-core:6.6.23.Final"
     api "jakarta.persistence:jakarta.persistence-api:3.2.0"
@@ -38,8 +53,11 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.2'
     implementation 'io.github.classgraph:classgraph:4.8.184'
 
+    examplesRuntimeOnly 'org.postgresql:postgresql:42.7.10'
+
     testImplementation 'org.postgresql:postgresql:42.7.10'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.14.2'
+    testImplementation 'org.awaitility:awaitility:4.3.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -82,4 +100,16 @@ test {
     testLogging {
         showStandardStreams = true
     }
+}
+
+jar {
+    from(sourceSets.main.output)
+    exclude 'sh/fyz/architect/examples/**'
+}
+
+tasks.register('runMigrationToolDemo', JavaExec) {
+    group = 'application'
+    description = 'Runs the Migration Tool Swing demo (requires PostgreSQL).'
+    classpath = sourceSets.examples.runtimeClasspath
+    mainClass = 'sh.fyz.architect.examples.MigrationToolDemo'
 }

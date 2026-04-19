@@ -21,9 +21,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 public class RedisManager {
 
+    private static final Logger LOG = Logger.getLogger(RedisManager.class.getName());
     private static volatile RedisManager instance;
     private static final Object LOCK = new Object();
 
@@ -39,8 +41,10 @@ public class RedisManager {
     private final boolean isReceiver;
     private volatile boolean isAlive = true;
     private final String keyPrefix;
+    private final int defaultTtlSeconds;
 
-    private RedisManager(String host, String password, int port, int timeout, int maxConnections, boolean receiver) {
+    private RedisManager(String host, String password, int port, int timeout, int maxConnections,
+                          boolean receiver, int defaultTtlSeconds) {
         JedisPoolConfig config = new JedisPoolConfig();
         config.setMaxTotal(maxConnections);
         config.setMaxIdle(maxConnections / 2);
@@ -49,6 +53,7 @@ public class RedisManager {
         config.setTimeBetweenEvictionRuns(java.time.Duration.ofSeconds(30));
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
         this.keyPrefix = "architect:";
+        this.defaultTtlSeconds = defaultTtlSeconds;
         if (receiver) {
             clearArchitectKeys();
         }
@@ -93,10 +98,16 @@ public class RedisManager {
         return redisQueueActionPool;
     }
 
-    public static void initialize(String host, String password, int port, int timeout, int maxConnections, boolean receiver) {
+    public static void initialize(String host, String password, int port, int timeout, int maxConnections,
+                                   boolean receiver) {
+        initialize(host, password, port, timeout, maxConnections, receiver, 0);
+    }
+
+    public static void initialize(String host, String password, int port, int timeout, int maxConnections,
+                                   boolean receiver, int defaultTtlSeconds) {
         synchronized (LOCK) {
             if (instance == null) {
-                instance = new RedisManager(host, password, port, timeout, maxConnections, receiver);
+                instance = new RedisManager(host, password, port, timeout, maxConnections, receiver, defaultTtlSeconds);
                 instance.createRedisPool();
             } else {
                 throw new IllegalStateException("RedisManager is already initialized!");
@@ -129,10 +140,20 @@ public class RedisManager {
         return instance != null;
     }
 
+    public int getDefaultTtlSeconds() {
+        return defaultTtlSeconds;
+    }
+
     public <T> void save(String key, T entity) {
         try (Jedis jedis = jedisPool.getResource()) {
             Map<String, Object> processedEntity = prepareForSave(entity);
-            jedis.set(keyPrefix + key, objectMapper.writeValueAsString(processedEntity));
+            String prefixedKey = keyPrefix + key;
+            String value = objectMapper.writeValueAsString(processedEntity);
+            if (defaultTtlSeconds > 0) {
+                jedis.setex(prefixedKey, defaultTtlSeconds, value);
+            } else {
+                jedis.set(prefixedKey, value);
+            }
         } catch (Exception e) {
             throw new RuntimeException("Failed to save entity to Redis: " + e.getMessage(), e);
         }
@@ -174,7 +195,7 @@ public class RedisManager {
                                     T entity = reconstructEntity(rawData, type);
                                     if (entity != null) result.add(entity);
                                 } catch (Exception e) {
-                                    System.err.println("WARN: Failed to deserialize cached entity: " + e.getMessage());
+                                    LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
                                 }
                             }
                         }
@@ -306,7 +327,7 @@ public class RedisManager {
                 }
             }
         } catch (Exception e) {
-            System.err.println("WARN: Failed to resolve generic type for field " + field.getName() + ": " + e.getMessage());
+            LOG.warning("Failed to resolve generic type for field " + field.getName() + ": " + e.getMessage());
         }
         return null;
     }

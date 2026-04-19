@@ -23,7 +23,8 @@ src/main/java/sh/fyz/architect/
 │   ├── SessionManager.java                 # Hibernate singleton
 │   ├── EnumCheckConstraintSynchronizer.java # Syncs enum CHECK constraints on PostgreSQL
 │   └── sql/
-│       ├── SQLAuthProvider.java            # Abstract JDBC provider
+│       ├── SQLAuthProvider.java            # Abstract JDBC provider (validates host/database)
+│       ├── TlsMode.java                    # DISABLE / PREFER / REQUIRE / VERIFY_CA / VERIFY_FULL
 │       └── provider/                       # H2, MariaDB, MySQL, PostgreSQL, SQLite
 ├── migration/
 │   ├── MigrationManager.java              # Public API: create, execute, clear, list, inspect
@@ -81,7 +82,14 @@ architect.stop();
 - `(provider, user, pass, poolSize)` — defaults: threadPool=10, hbm2ddl="update"
 - `(provider, user, pass, poolSize, threadPoolSize, hbm2ddlAuto)`
 
-SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`.
+SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are validated against `[A-Za-z0-9._-]`; SQLite paths are normalized.
+
+Optional TLS via `withTls(TlsMode)` (network providers only — SQLite throws `UnsupportedOperationException`):
+
+```java
+new PostgreSQLAuth("db", 5432, "app").withTls(TlsMode.REQUIRE)
+new MySQLAuth("db", 3306, "app").withTls(TlsMode.VERIFY_FULL)
+```
 
 ## Repository Types
 
@@ -158,7 +166,7 @@ Entry point: `repo.query()`. Conditions are ANDed.
 .whereNotIn("field", collection)
 .whereNull("field")
 .whereNotNull("field")
-.whereRaw("HQL fragment", Map.of("param", val)) // raw HQL with named params
+.whereRaw("HQL fragment", Map.of("param", val)) // raw HQL with named params (only overload as of 2.2.0)
 .orderBy("field")                               // ASC
 .orderBy("field", SortOrder.DESC)
 .limit(n)
@@ -180,6 +188,9 @@ Async: `.findAllAsync()`, `.findFirstAsync()`, `.countAsync()`, `.deleteAsync()`
 
 ```java
 architect.setRedisCredentials(new RedisCredentials(host, password, port, timeout, maxConnections));
+
+// With a default TTL (seconds) applied to every cached key. 0 = no expiry (default).
+architect.setRedisCredentials(new RedisCredentials(host, password, port, timeout, maxConnections, 3600));
 ```
 
 `RedisManager` keys are prefixed `architect:`. On receiver startup, all `architect:*` keys are cleared.
@@ -224,10 +235,10 @@ String content = manager.readMigrationContent("v1_init");  // raw SQL content
 #### Clear the database
 
 ```java
-manager.clearDatabase();
+manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION); // "CONFIRM_DROP_ALL"
 ```
 
-Drops all tables. Strategy varies by dialect:
+The confirmation token is required (raises `IllegalArgumentException` otherwise). The no-arg overload is `@Deprecated` and logs a warning. Drops all tables. Strategy varies by dialect:
 - PostgreSQL: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
 - MySQL/MariaDB: disables FK checks, drops each table, re-enables FK checks
 - H2: `DROP ALL OBJECTS`
@@ -246,8 +257,10 @@ Table names are validated against `DatabaseMetaData` to prevent SQL injection.
 
 1. During development: use `hbm2ddlAuto = "update"` as usual
 2. Before deploying: `manager.createMigration("v1_release")` to snapshot the schema
-3. In production: set `hbm2ddlAuto = "none"`, run `manager.executeMigration("v1_release")` on a clean database
+3. In production: set `hbm2ddlAuto = "none"` (mandatory), run `manager.executeMigration("v1_release")` on a clean database
 4. Migrations are full snapshots (not incremental diffs like Flyway)
+
+Migration filenames are validated and resolved against the migration directory; any path that escapes (`../`, absolute paths, etc.) is rejected with `IllegalArgumentException`.
 
 ### Key classes
 
@@ -264,6 +277,8 @@ Table names are validated against `DatabaseMetaData` to prevent SQL injection.
 - `limit(-1)` or `offset(-1)` throw `IllegalArgumentException`.
 - Always call `architect.stop()` on shutdown.
 - `GenericCachedRepository.save()` on a new entity (id=null) is only allowed on receiver instances.
+- `architect.start()` is idempotent — calling it twice is a no-op. If DB initialization fails after Redis was set up, Redis is rolled back automatically.
+- `SessionManager.getSession()` rejects calls on a closed `SessionFactory` with a clear `IllegalStateException`.
 
 ## Installation
 
@@ -271,7 +286,7 @@ Table names are validated against `DatabaseMetaData` to prevent SQL injection.
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.1.0'
+    implementation 'sh.fyz:Architect:2.2.0'
 }
 ```
 
@@ -281,6 +296,6 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.1.0</version>
+    <version>2.2.0</version>
 </dependency>
 ```
