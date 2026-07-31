@@ -52,8 +52,9 @@ public class MigrationRunnerTest {
         architect.start();
 
         runner = new MigrationRunner(architect, migrationDir);
-        // Start from a known state: this table survives between runs otherwise.
+        // Start from a known state: these tables survive between runs otherwise.
         runner.manager().executeSql("DROP TABLE IF EXISTS " + MigrationRunner.HISTORY_TABLE);
+        runner.manager().executeSql("DROP TABLE IF EXISTS runner_widget");
     }
 
     @AfterAll
@@ -322,25 +323,68 @@ public class MigrationRunnerTest {
     }
 
     @Test
-    @Order(43)
-    @DisplayName("create numerote la migration suivante")
-    void testCliCreate() {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int code = MigrationCli.run(architect, migrationDir, new String[]{"create", "add_index"},
-                new PrintStream(out), new PrintStream(new ByteArrayOutputStream()));
-
-        assertEquals(MigrationCli.EXIT_OK, code);
-        // Highest on disk is V10, so the next one is V11.
-        assertTrue(Files.exists(migrationDir.resolve("V11__add_index.sql")),
-                "expected V11__add_index.sql, directory held: " + runner.manager().listMigrations());
-    }
-
-    @Test
     @Order(44)
     @DisplayName("les contraintes enum sont generables pour une migration")
     void testEnumConstraintStatements() {
         // Product has no enum column, so this is about the call being wired and
         // dialect-safe rather than about the statement count.
         assertNotNull(runner.enumConstraintStatements());
+    }
+
+    @Test
+    @Order(45)
+    @DisplayName("un flag sans valeur sort en erreur propre, pas en exception")
+    void testCliFlagMissingValue() {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir,
+                new String[]{"diff", "add_col", "--shadow-url"},
+                new PrintStream(new ByteArrayOutputStream()), new PrintStream(err));
+
+        assertEquals(MigrationCli.EXIT_ERROR, code);
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("--shadow-url"));
+    }
+
+    @Test
+    @Order(46)
+    @DisplayName("une option inconnue est refusee au lieu de finir dans la description")
+    void testCliUnknownOption() {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir,
+                new String[]{"diff", "add_col", "--shadow_url", "jdbc:postgresql://x/y"},
+                new PrintStream(new ByteArrayOutputStream()), new PrintStream(err));
+
+        assertEquals(MigrationCli.EXIT_ERROR, code);
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("Unknown option: --shadow_url"));
+    }
+
+    @Test
+    @Order(47)
+    @DisplayName("diff bout en bout : shadow reconstruit, migration suivante ecrite")
+    void testCliDiffEndToEnd() throws Exception {
+        // The shadow must be a separate database; create it through a plain connection
+        // because CREATE DATABASE cannot run inside a transaction.
+        String shadowDb = DB_NAME + "_shadow";
+        try (var connection = java.sql.DriverManager.getConnection(
+                "jdbc:postgresql://" + DB_HOST + ":" + DB_PORT + "/" + DB_NAME, DB_USER, DB_PASS);
+             var statement = connection.createStatement()) {
+            statement.execute("DROP DATABASE IF EXISTS " + shadowDb);
+            statement.execute("CREATE DATABASE " + shadowDb);
+        }
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir,
+                new String[]{"diff", "sync_model", "--shadow-url",
+                        "jdbc:postgresql://" + DB_HOST + ":" + DB_PORT + "/" + shadowDb},
+                new PrintStream(out), new PrintStream(err));
+
+        assertEquals(MigrationCli.EXIT_OK, code, err.toString(StandardCharsets.UTF_8));
+        // Highest on disk is V10, so the generated file is V11.
+        Path file = migrationDir.resolve("V11__sync_model.sql");
+        assertTrue(Files.exists(file), "expected V11__sync_model.sql; output: "
+                + out.toString(StandardCharsets.UTF_8));
+        String sql = Files.readString(file);
+        assertTrue(sql.toLowerCase().contains("test_products"),
+                "the registered entity's table must be in the diff: " + sql);
     }
 }

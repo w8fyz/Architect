@@ -407,6 +407,8 @@ CompletableFuture<Integer> deleted  = query().where("active", false).deleteAsync
 
 Architect includes a built-in migration tool to capture your schema as SQL files, execute them, clear the database, or inspect its contents. This is useful for production deployments where `hbm2ddl.auto` should be set to `"none"`.
 
+For the versioned workflow — generating incremental migrations from your entity changes with `diff`, applying them in order with a history table, and moving changes from dev to prod — see **[MIGRATIONS.md](MIGRATIONS.md)**.
+
 ### Setup
 
 ```java
@@ -466,10 +468,10 @@ This opens a desktop window with tabs for Create, Execute, Clear, and View opera
 ### Production workflow
 
 1. **Development**: use `hbm2ddlAuto = "update"` as usual
-2. **Pre-deploy**: call `manager.createMigration("v1_release")` to snapshot the schema
-3. **Production**: set `hbm2ddlAuto = "none"` and run `manager.executeMigration("v1_release")`
+2. **Pre-deploy**: run `migrate diff <description> --shadow-url <scratch-db>` to generate the incremental migration your entity changes require
+3. **Production**: set `hbm2ddlAuto = "validate"` and run `migrate verify` + `migrate apply`
 
-Migrations are full schema snapshots (not incremental). Each `.sql` file creates the complete schema from scratch.
+`MigrationManager.createMigration` still produces full schema snapshots (useful as a baseline for a brand-new database); the `diff` command generates incremental migrations. The complete workflow — shadow databases, baselines, review of destructive changes — is documented in [MIGRATIONS.md](MIGRATIONS.md).
 
 ## Lifecycle
 

@@ -256,9 +256,9 @@ Table names are validated against `DatabaseMetaData` to prevent SQL injection.
 ### Typical production workflow
 
 1. During development: use `hbm2ddlAuto = "update"` as usual
-2. Before deploying: `manager.createMigration("v1_release")` to snapshot the schema
-3. In production: set `hbm2ddlAuto = "none"` (mandatory), run `manager.executeMigration("v1_release")` on a clean database
-4. Migrations are full snapshots (not incremental diffs like Flyway)
+2. Before deploying: `MigrationCli` `diff <desc> --shadow-url <scratch-db>` generates the incremental `V<n>__<desc>.sql` your entity changes require (see MIGRATIONS.md)
+3. In production: set `hbm2ddlAuto = "validate"` and run `MigrationCli` `verify` + `apply`; the history table `architect_schema_history` records what ran
+4. `manager.createMigration` still emits full snapshots — useful as a `baseline` for a brand-new or adopted database, not as an incremental step
 
 Migration filenames are validated and resolved against the migration directory; any path that escapes (`../`, absolute paths, etc.) is rejected with `IllegalArgumentException`.
 

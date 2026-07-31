@@ -240,6 +240,106 @@ public class EnumCheckConstraintSynchronizer {
         return statements;
     }
 
+    /**
+     * Like {@link #generateEnumConstraintsDDL}, but returns only what a given database is
+     * actually missing: constraints whose live definition no longer matches the Java enum, plus
+     * those absent from a table that already exists.
+     *
+     * <p>Written for migration tooling. {@link #synchronize} repairs these in place, but it only
+     * runs under {@code hbm2ddl=update} — a deployment on {@code validate} has no such repair, and
+     * Hibernate's schema migrator never touches CHECK constraints on an existing table. Without
+     * this, adding a constant to a stored enum passes every local check and then fails every
+     * production INSERT carrying the new value.</p>
+     *
+     * <p>Emits a {@code DROP CONSTRAINT IF EXISTS} before each {@code ADD}, so applying the result
+     * twice is harmless. Comparison semantics match {@link #syncStringEnum} and
+     * {@link #syncOrdinalEnum}: the permitted value set for a STRING enum, the upper bound for an
+     * ORDINAL one.</p>
+     *
+     * @param connection an open connection to the database being compared against
+     * @return empty on non-PostgreSQL dialects, or when everything already agrees
+     */
+    public static List<String> generateEnumConstraintsDelta(Collection<Class<?>> entityClasses,
+                                                            String dialect, Connection connection) {
+        List<String> statements = new ArrayList<>();
+        if (!dialect.toLowerCase().contains("postgresql")) {
+            return statements;
+        }
+
+        for (EnumColumnMapping mapping : collectEnumMappings(entityClasses)) {
+            String constraintName = mapping.tableName() + "_" + mapping.columnName() + "_check";
+            try {
+                String existingDef = queryConstraintDefinition(connection, mapping.tableName(), constraintName);
+
+                if (existingDef == null) {
+                    // Missing. Only worth emitting when the table already exists — otherwise the
+                    // migrator's CREATE TABLE carries the constraint with it.
+                    if (!tableExists(connection, mapping.tableName())) {
+                        continue;
+                    }
+                } else if (matchesCurrentEnum(mapping, existingDef)) {
+                    continue;
+                }
+
+                statements.add("ALTER TABLE \"" + mapping.tableName()
+                        + "\" DROP CONSTRAINT IF EXISTS \"" + constraintName + "\"");
+                statements.add("ALTER TABLE \"" + mapping.tableName() + "\" ADD CONSTRAINT \""
+                        + constraintName + "\" CHECK (" + currentCheckExpression(mapping) + ")");
+            } catch (SQLException e) {
+                LOG.warning("Failed to compare CHECK constraint \"" + constraintName + "\": " + e.getMessage());
+            }
+        }
+        return statements;
+    }
+
+    /** Whether a live constraint definition already permits exactly the current enum. */
+    private static boolean matchesCurrentEnum(EnumColumnMapping mapping, String existingDef) {
+        if (mapping.enumType() == EnumType.STRING) {
+            Set<String> existing = new TreeSet<>();
+            Matcher m = QUOTED_VALUE.matcher(existingDef);
+            while (m.find()) {
+                existing.add(m.group(1));
+            }
+            Set<String> current = Arrays.stream(mapping.enumClass().getEnumConstants())
+                    .map(Enum::name)
+                    .collect(Collectors.toCollection(TreeSet::new));
+            return existing.equals(current);
+        }
+        Matcher m = BETWEEN_RANGE.matcher(existingDef);
+        if (!m.find()) {
+            return false;
+        }
+        return Integer.parseInt(m.group(2)) == mapping.enumClass().getEnumConstants().length - 1;
+    }
+
+    /** The CHECK body describing the enum as it stands in Java. */
+    private static String currentCheckExpression(EnumColumnMapping mapping) {
+        if (mapping.enumType() == EnumType.STRING) {
+            String values = Arrays.stream(mapping.enumClass().getEnumConstants())
+                    .map(Enum::name)
+                    .sorted()
+                    .map(v -> "'" + v.replace("'", "''") + "'::character varying")
+                    .collect(Collectors.joining(", "));
+            return "(\"" + mapping.columnName() + "\")::text = ANY (ARRAY[" + values + "]::text[])";
+        }
+        return "\"" + mapping.columnName() + "\" BETWEEN 0 AND "
+                + (mapping.enumClass().getEnumConstants().length - 1);
+    }
+
+    private static boolean tableExists(Connection connection, String tableName) throws SQLException {
+        try (ResultSet rs = connection.getMetaData()
+                .getTables(null, null, tableName, new String[]{"TABLE"})) {
+            if (rs.next()) {
+                return true;
+            }
+        }
+        // PostgreSQL folds unquoted identifiers to lower case; Architect quotes them, so try both.
+        try (ResultSet rs = connection.getMetaData()
+                .getTables(null, null, tableName.toLowerCase(), new String[]{"TABLE"})) {
+            return rs.next();
+        }
+    }
+
     private static List<Field> getAllFields(Class<?> clazz) {
         List<Field> fields = new ArrayList<>();
         Class<?> current = clazz;
