@@ -1,0 +1,346 @@
+package sh.fyz.architect.test;
+
+import org.junit.jupiter.api.*;
+import sh.fyz.architect.Architect;
+import sh.fyz.architect.migration.MigrationCli;
+import sh.fyz.architect.migration.MigrationRunner;
+import sh.fyz.architect.migration.MigrationVersion;
+import sh.fyz.architect.persistent.DatabaseCredentials;
+import sh.fyz.architect.persistent.sql.provider.PostgreSQLAuth;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Versioned migration layer. Needs a reachable PostgreSQL — same env knobs as
+ * {@link MigrationTest}.
+ */
+@DisplayName("Migration Runner")
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+public class MigrationRunnerTest {
+
+    private static final String DB_HOST = System.getenv().getOrDefault("DB_HOST", "localhost");
+    private static final int DB_PORT = Integer.parseInt(System.getenv().getOrDefault("DB_PORT", "5440"));
+    private static final String DB_NAME = System.getenv().getOrDefault("DB_NAME", "architect_test");
+    private static final String DB_USER = System.getenv().getOrDefault("DB_USER", "architect");
+    private static final String DB_PASS = System.getenv().getOrDefault("DB_PASS", "architect");
+
+    private Architect architect;
+    private MigrationRunner runner;
+    private Path migrationDir;
+
+    @BeforeAll
+    void setUp() throws IOException {
+        migrationDir = Files.createTempDirectory("architect-runner-test-");
+
+        architect = new Architect()
+                .setReceiver(true)
+                .setDatabaseCredentials(new DatabaseCredentials(
+                        new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
+                        DB_USER, DB_PASS, 2, 2, "update"
+                ));
+        architect.addEntityClass(Product.class);
+        architect.start();
+
+        runner = new MigrationRunner(architect, migrationDir);
+        // Start from a known state: this table survives between runs otherwise.
+        runner.manager().executeSql("DROP TABLE IF EXISTS " + MigrationRunner.HISTORY_TABLE);
+    }
+
+    @AfterAll
+    void tearDown() throws IOException {
+        if (runner != null) {
+            try {
+                runner.manager().executeSql("DROP TABLE IF EXISTS " + MigrationRunner.HISTORY_TABLE);
+            } catch (Exception ignored) {
+                // Best effort — a failed test may have left no table at all.
+            }
+        }
+        if (architect != null) {
+            architect.stop();
+        }
+        if (migrationDir != null && Files.exists(migrationDir)) {
+            Files.walk(migrationDir)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                    });
+        }
+    }
+
+    // ── Version parsing ──────────────────────────────────────────────────────
+
+    @Test
+    @Order(1)
+    @DisplayName("parse() accepte V<version>__<description>.sql")
+    void testParse() {
+        MigrationVersion v = MigrationVersion.parse("V1__initial_schema.sql");
+        assertNotNull(v);
+        assertEquals("1", v.raw());
+        assertEquals("initial_schema", v.description());
+        assertEquals("V1__initial_schema.sql", v.filename());
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("parse() rejette ce qui ne suit pas la convention")
+    void testParseRejects() {
+        assertNull(MigrationVersion.parse("initial.sql"));
+        assertNull(MigrationVersion.parse("V1_missing_double_underscore.sql"));
+        assertNull(MigrationVersion.parse("Vx__not_numeric.sql"));
+        assertNull(MigrationVersion.parse(null));
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("l'ordre est numerique, pas lexicographique")
+    void testOrderingIsNumeric() {
+        MigrationVersion v2 = MigrationVersion.parse("V2__b.sql");
+        MigrationVersion v10 = MigrationVersion.parse("V10__a.sql");
+        assertNotNull(v2);
+        assertNotNull(v10);
+        // The bug a plain string sort would introduce: "V10" < "V2".
+        assertTrue(v2.compareTo(v10) < 0, "V2 must sort before V10");
+        assertTrue("V10__a.sql".compareTo("V2__b.sql") < 0, "string sort disagrees, as expected");
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("un prefixe commun classe le plus court en premier")
+    void testOrderingPrefix() {
+        MigrationVersion v1 = MigrationVersion.parse("V1__a.sql");
+        MigrationVersion v1_1 = MigrationVersion.parse("V1.1__b.sql");
+        assertNotNull(v1);
+        assertNotNull(v1_1);
+        assertTrue(v1.compareTo(v1_1) < 0);
+    }
+
+    // ── Discovery and history ────────────────────────────────────────────────
+
+    @Test
+    @Order(10)
+    @DisplayName("une base neuve n'a rien d'applique")
+    void testEmptyHistory() {
+        assertTrue(runner.applied().isEmpty());
+        assertTrue(runner.pending().isEmpty());
+        assertTrue(runner.verify().isEmpty());
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("les fichiers hors convention sont ignores, pas fatals")
+    void testIgnoredFiles() throws IOException {
+        Files.writeString(migrationDir.resolve("notes.sql"), "-- scratch\n");
+        assertTrue(runner.ignored().contains("notes.sql"));
+        assertTrue(runner.available().isEmpty(), "a non-conforming file is not a migration");
+        Files.delete(migrationDir.resolve("notes.sql"));
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("un fichier ajoute devient pending")
+    void testPendingDetected() throws IOException {
+        Files.writeString(migrationDir.resolve("V1__create_widget.sql"),
+                "CREATE TABLE runner_widget (id INTEGER PRIMARY KEY, label VARCHAR(64));");
+        List<MigrationRunner.Available> pending = runner.pending();
+        assertEquals(1, pending.size());
+        assertEquals("V1__create_widget.sql", pending.get(0).filename());
+    }
+
+    // ── Applying ─────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(20)
+    @DisplayName("--dry-run ne touche a rien")
+    void testDryRun() {
+        List<MigrationRunner.Available> would = runner.apply(true);
+        assertEquals(1, would.size());
+        assertTrue(runner.applied().isEmpty(), "dry run must not record anything");
+    }
+
+    @Test
+    @Order(21)
+    @DisplayName("apply() execute et enregistre")
+    void testApply() {
+        List<MigrationRunner.Available> ran = runner.apply(false);
+        assertEquals(1, ran.size());
+
+        List<MigrationRunner.Applied> applied = runner.applied();
+        assertEquals(1, applied.size());
+        assertEquals("1", applied.get(0).version());
+        assertEquals("create_widget", applied.get(0).description());
+        assertTrue(runner.pending().isEmpty());
+
+        // The table really exists now.
+        assertTrue(runner.manager().listTables().stream()
+                .anyMatch(t -> t.name().equalsIgnoreCase("runner_widget")));
+    }
+
+    @Test
+    @Order(22)
+    @DisplayName("apply() est idempotent — rien a refaire")
+    void testApplyTwice() {
+        assertTrue(runner.apply(false).isEmpty(), "nothing should be pending on a second run");
+    }
+
+    @Test
+    @Order(23)
+    @DisplayName("l'ordre d'execution suit la version, pas le nom de fichier")
+    void testAppliesInVersionOrder() throws IOException {
+        Files.writeString(migrationDir.resolve("V10__add_late.sql"),
+                "ALTER TABLE runner_widget ADD COLUMN late_col INTEGER;");
+        Files.writeString(migrationDir.resolve("V2__add_early.sql"),
+                "ALTER TABLE runner_widget ADD COLUMN early_col INTEGER;");
+
+        List<MigrationRunner.Available> ran = runner.apply(false);
+        assertEquals(2, ran.size());
+        assertEquals("V2__add_early.sql", ran.get(0).filename(), "V2 must run before V10");
+        assertEquals("V10__add_late.sql", ran.get(1).filename());
+    }
+
+    @Test
+    @Order(24)
+    @DisplayName("un echec annule la migration entiere")
+    void testFailureRollsBack() throws IOException {
+        // Second statement is invalid, so the first must not survive either.
+        Files.writeString(migrationDir.resolve("V11__broken.sql"),
+                "ALTER TABLE runner_widget ADD COLUMN good_col INTEGER;\n"
+                        + "THIS IS NOT SQL;");
+
+        assertThrows(Exception.class, () -> runner.apply(false));
+
+        assertTrue(runner.applied().stream().noneMatch(a -> a.version().equals("11")),
+                "a failed migration must not be recorded");
+        assertFalse(runner.manager().getTableSchema("runner_widget").columns().stream()
+                        .anyMatch(c -> c.name().equalsIgnoreCase("good_col")),
+                "the successful statement must have rolled back with the failing one");
+
+        Files.delete(migrationDir.resolve("V11__broken.sql"));
+    }
+
+    // ── Verification ─────────────────────────────────────────────────────────
+
+    @Test
+    @Order(30)
+    @DisplayName("modifier un fichier deja applique est signale")
+    void testChecksumDrift() throws IOException {
+        Path applied = migrationDir.resolve("V1__create_widget.sql");
+        String original = Files.readString(applied);
+        Files.writeString(applied, original + "\n-- edited after the fact\n");
+
+        List<MigrationRunner.Problem> problems = runner.verify();
+        assertTrue(problems.stream().anyMatch(p -> p.version().equals("1")
+                        && p.detail().contains("checksum")),
+                "an edited applied migration must be reported");
+
+        Files.writeString(applied, original);
+        assertTrue(runner.verify().isEmpty(), "restoring the file clears the problem");
+    }
+
+    @Test
+    @Order(31)
+    @DisplayName("supprimer un fichier deja applique est signale")
+    void testMissingFile() throws IOException {
+        Path applied = migrationDir.resolve("V2__add_early.sql");
+        String original = Files.readString(applied);
+        Files.delete(applied);
+
+        assertTrue(runner.verify().stream().anyMatch(p -> p.detail().contains("missing")),
+                "an applied migration whose file vanished must be reported");
+
+        Files.writeString(applied, original);
+        assertTrue(runner.verify().isEmpty());
+    }
+
+    @Test
+    @Order(32)
+    @DisplayName("une migration inseree avant la derniere appliquee est signalee")
+    void testOutOfOrder() throws IOException {
+        Files.writeString(migrationDir.resolve("V3__sneaked_in.sql"),
+                "ALTER TABLE runner_widget ADD COLUMN sneaky INTEGER;");
+
+        assertTrue(runner.verify().stream().anyMatch(p -> p.detail().contains("out of order")),
+                "V3 arriving after V10 was applied must be reported");
+
+        Files.delete(migrationDir.resolve("V3__sneaked_in.sql"));
+    }
+
+    // ── CLI ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(40)
+    @DisplayName("apply refuse de tourner quand verify signale un probleme")
+    void testCliApplyRefusesOnProblems() throws IOException {
+        Path applied = migrationDir.resolve("V1__create_widget.sql");
+        String original = Files.readString(applied);
+        Files.writeString(applied, original + "\n-- tampered\n");
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir, new String[]{"apply"},
+                new PrintStream(out), new PrintStream(err));
+
+        assertEquals(MigrationCli.EXIT_PROBLEMS, code);
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("Refusing to apply"));
+
+        Files.writeString(applied, original);
+    }
+
+    @Test
+    @Order(41)
+    @DisplayName("verify sort 0 quand tout concorde")
+    void testCliVerifyClean() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir, new String[]{"verify"},
+                new PrintStream(out), new PrintStream(new ByteArrayOutputStream()));
+
+        assertEquals(MigrationCli.EXIT_OK, code);
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("OK"));
+    }
+
+    @Test
+    @Order(42)
+    @DisplayName("status liste applique et pending")
+    void testCliStatus() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir, new String[]{"status"},
+                new PrintStream(out), new PrintStream(new ByteArrayOutputStream()));
+
+        assertEquals(MigrationCli.EXIT_OK, code);
+        String text = out.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("Applied"));
+        assertTrue(text.contains("Pending"));
+    }
+
+    @Test
+    @Order(43)
+    @DisplayName("create numerote la migration suivante")
+    void testCliCreate() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int code = MigrationCli.run(architect, migrationDir, new String[]{"create", "add_index"},
+                new PrintStream(out), new PrintStream(new ByteArrayOutputStream()));
+
+        assertEquals(MigrationCli.EXIT_OK, code);
+        // Highest on disk is V10, so the next one is V11.
+        assertTrue(Files.exists(migrationDir.resolve("V11__add_index.sql")),
+                "expected V11__add_index.sql, directory held: " + runner.manager().listMigrations());
+    }
+
+    @Test
+    @Order(44)
+    @DisplayName("les contraintes enum sont generables pour une migration")
+    void testEnumConstraintStatements() {
+        // Product has no enum column, so this is about the call being wired and
+        // dialect-safe rather than about the statement count.
+        assertNotNull(runner.enumConstraintStatements());
+    }
+}

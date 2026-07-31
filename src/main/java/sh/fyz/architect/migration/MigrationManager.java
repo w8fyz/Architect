@@ -250,8 +250,12 @@ public class MigrationManager {
      * Respects single-quoted strings, double-quoted identifiers, line ({@code --})
      * and block ({@code / * ... * /}) comments, and PostgreSQL dollar-quoted
      * string literals ({@code $$...$$} or {@code $tag$...$tag$}).
+     *
+     * <p>Package-private and static so {@link MigrationRunner} can split a script
+     * exactly the same way, then execute it alongside its history bookkeeping in a
+     * single transaction. Holds no instance state.</p>
      */
-    private List<String> parseSqlStatements(String sql) {
+    static List<String> parseSqlStatements(String sql) {
         List<String> statements = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean inSingleQuote = false;
