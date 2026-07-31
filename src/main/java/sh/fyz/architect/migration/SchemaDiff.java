@@ -362,11 +362,16 @@ public class SchemaDiff {
     }
 
     private static final List<Set<String>> ALIASES = List.of(
-            Set.of("int8", "bigint"),
+            Set.of("int8", "bigint", "bigserial"),
             Set.of("int4", "int", "integer", "serial"),
             Set.of("int2", "smallint"),
             Set.of("bool", "boolean", "bit"),
-            Set.of("float8", "double precision", "double"),
+            // "float" appears in both float groups on purpose: Hibernate writes
+            // double as float(53) and real as float(24); once the precision is
+            // stripped both read "float", which must not be flagged against
+            // either live type. A real float4<->float8 change still surfaces,
+            // since JDBC reports those names, not "float".
+            Set.of("float8", "double precision", "double", "float"),
             Set.of("float4", "real", "float"),
             Set.of("varchar", "character varying"),
             Set.of("bpchar", "char", "character"),
@@ -377,14 +382,32 @@ public class SchemaDiff {
             Set.of("numeric", "decimal")
     );
 
-    /** Lowercases, drops the length/precision suffix and collapses whitespace. */
+    /**
+     * Lowercases, strips surrounding double quotes, drops the length/precision
+     * suffix and collapses whitespace.
+     *
+     * <p>The quote stripping matters: with {@code GLOBALLY_QUOTED_IDENTIFIERS}
+     * a {@code columnDefinition}-provided type reaches the model side as
+     * {@code "text"} (quotes included), which must compare equal to the bare
+     * {@code text} JDBC reports — otherwise every such column is flagged as a
+     * type change on every diff.</p>
+     */
     private static String normaliseType(String type) {
         String t = type.toLowerCase(Locale.ROOT).trim();
-        int paren = t.indexOf('(');
-        if (paren > 0) {
-            t = t.substring(0, paren);
+        if (t.length() > 1 && t.startsWith("\"") && t.endsWith("\"")) {
+            t = t.substring(1, t.length() - 1).trim();
         }
-        return t.replaceAll("\\s+", " ").trim();
+        // Remove length/precision but KEEP what follows: "varchar(255) array"
+        // must keep its array suffix, "timestamp(6) with time zone" its zone.
+        t = t.replaceAll("\\([^)]*\\)", " ").replaceAll("\\s+", " ").trim();
+        // The three spellings of an array type: JDBC metadata reports the
+        // internal "_varchar", DDL writes "varchar array" or "varchar[]".
+        if (t.startsWith("_")) {
+            t = t.substring(1) + " array";
+        } else if (t.endsWith("[]")) {
+            t = t.substring(0, t.length() - 2).trim() + " array";
+        }
+        return t;
     }
 
     // ── Rename hints ─────────────────────────────────────────────────────────

@@ -65,6 +65,19 @@ public final class DiffFixtures {
         @Override public Object getId() { return id; }
     }
 
+    @Entity
+    @Table(name = "diff_quirks")
+    public static class QuirkTypes implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        /** columnDefinition types arrive quoted under GLOBALLY_QUOTED_IDENTIFIERS. */
+        @Column(name = "body", columnDefinition = "text") public String body;
+        /** Hibernate writes double as float(53); PostgreSQL reports float8. */
+        @Column(name = "ratio") public double ratio;
+        /** Arrays: JDBC reports the internal _varchar; DDL says varchar(255) array. */
+        @Column(name = "tags") public String[] tags;
+        @Override public Object getId() { return id; }
+    }
+
     /** {@link EnumHolderV1} with one more enum constant. */
     @Entity
     @Table(name = "diff_enum_holder")

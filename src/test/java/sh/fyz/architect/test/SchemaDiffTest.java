@@ -178,6 +178,19 @@ public class SchemaDiffTest {
         assertTrue(sql.contains("Possible renames"));
     }
 
+    @Test
+    @Order(14)
+    @DisplayName("columnDefinition et double ne produisent pas de faux type change")
+    void testNoFalseTypeChanges() throws Exception {
+        applyAdditive(diff(QuirkTypes.class));
+
+        SchemaDiff.Result second = diff(QuirkTypes.class);
+        assertTrue(second.typeChanges().isEmpty(),
+                "a quoted columnDefinition type (\"text\") or a float(53) double must not "
+                        + "be reported against the live text/float8: " + second.typeChanges());
+        assertTrue(second.isEmpty(), "must converge: " + second.additive() + second.removals());
+    }
+
     // ── Enums ────────────────────────────────────────────────────────────────
 
     @Test
