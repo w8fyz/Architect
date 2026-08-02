@@ -283,8 +283,11 @@ public class SchemaDiff {
         for (Map.Entry<String, Map<String, String>> entry : live.entrySet()) {
             String table = entry.getKey();
 
-            // The migration history table belongs to the tool, not to any model.
-            if (MigrationRunner.HISTORY_TABLE.equalsIgnoreCase(table)) {
+            // Migration history tables belong to the tool, not to any model. Prefix
+            // match, not equality: a database hosting several migration streams has
+            // one history table per stream (architect_schema_history_<stream>), and
+            // none of them is ever part of any stream's entity model.
+            if (table.toLowerCase(Locale.ROOT).startsWith(MigrationRunner.HISTORY_TABLE)) {
                 continue;
             }
 

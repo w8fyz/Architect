@@ -387,4 +387,41 @@ public class MigrationRunnerTest {
         assertTrue(sql.toLowerCase().contains("test_products"),
                 "the registered entity's table must be in the diff: " + sql);
     }
+
+    @Test
+    @Order(50)
+    @DisplayName("un flux avec sa propre table d'historique est independant du flux par defaut")
+    void testCustomHistoryTableIsAnIndependentStream() throws IOException {
+        String streamTable = MigrationRunner.HISTORY_TABLE + "_stream_a";
+        runner.manager().executeSql("DROP TABLE IF EXISTS " + streamTable);
+        runner.manager().executeSql("DROP TABLE IF EXISTS stream_a_widget");
+        Path streamDir = Files.createTempDirectory("architect-runner-stream-a-");
+        Files.writeString(streamDir.resolve("V1__stream_a.sql"),
+                "CREATE TABLE stream_a_widget (id INT PRIMARY KEY);");
+
+        MigrationRunner stream = new MigrationRunner(architect, streamDir, streamTable);
+        assertEquals(1, stream.apply(false).size());
+        assertEquals(1, stream.applied().size());
+        assertTrue(stream.pending().isEmpty());
+
+        // The default-history runner never sees the other stream's rows.
+        for (MigrationRunner.Applied a : runner.applied()) {
+            assertNotEquals("V1__stream_a.sql", a.filename(),
+                    "stream history leaked into the default history table");
+        }
+
+        runner.manager().executeSql("DROP TABLE IF EXISTS stream_a_widget");
+        runner.manager().executeSql("DROP TABLE IF EXISTS " + streamTable);
+    }
+
+    @Test
+    @Order(51)
+    @DisplayName("le nom de table d'historique est contraint au prefixe de l'outil")
+    void testHistoryTableNameIsValidated() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new MigrationRunner(architect, migrationDir, "my_history"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new MigrationRunner(architect, migrationDir,
+                        MigrationRunner.HISTORY_TABLE + "_x; DROP TABLE"));
+    }
 }

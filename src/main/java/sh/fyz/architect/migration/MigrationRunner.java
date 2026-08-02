@@ -51,19 +51,51 @@ public class MigrationRunner {
 
     private static final Logger LOG = Logger.getLogger(MigrationRunner.class.getName());
 
-    /** Bookkeeping table. Created on first use; never dropped by this class. */
+    /**
+     * Default bookkeeping table. Created on first use; never dropped by this class.
+     *
+     * <p>Also the shared naming prefix: several migration streams can coexist on one
+     * database (one application owning some tables, another application owning others)
+     * as long as each stream keeps its own history in a table named
+     * {@code architect_schema_history_<stream>}. {@link SchemaDiff} treats every table
+     * carrying this prefix as tool bookkeeping and keeps it out of any model
+     * comparison. Custom history tables must therefore start with this prefix —
+     * {@link #MigrationRunner(Architect, Path, String)} enforces it.</p>
+     */
     public static final String HISTORY_TABLE = "architect_schema_history";
 
     private final Architect architect;
     private final MigrationManager manager;
     private final Path migrationDirectory;
     private final String dialect;
+    private final String historyTable;
 
     public MigrationRunner(Architect architect, Path migrationDirectory) {
+        this(architect, migrationDirectory, HISTORY_TABLE);
+    }
+
+    /**
+     * A runner whose history lives in {@code historyTable} instead of the default —
+     * for a database hosting several independent migration streams. The name must
+     * start with {@link #HISTORY_TABLE} (see there) and stay a plain identifier;
+     * it is concatenated into DDL/DML.
+     */
+    public MigrationRunner(Architect architect, Path migrationDirectory, String historyTable) {
+        if (historyTable == null || !historyTable.startsWith(HISTORY_TABLE)
+                || !historyTable.matches("[A-Za-z0-9_]+")) {
+            throw new IllegalArgumentException("History table must match '" + HISTORY_TABLE
+                    + "[_a-zA-Z0-9]*', got: " + historyTable);
+        }
         this.architect = architect;
         this.manager = new MigrationManager(architect, migrationDirectory);
         this.migrationDirectory = migrationDirectory;
         this.dialect = architect.getDatabaseCredentials().getSQLAuthProvider().getDialect();
+        this.historyTable = historyTable;
+    }
+
+    /** The history table this runner reads and writes. */
+    public String historyTable() {
+        return historyTable;
     }
 
     /** A migration file on disk that parses as a versioned migration. */
@@ -115,7 +147,7 @@ public class MigrationRunner {
         List<Applied> out = new ArrayList<>();
         withConnection(connection -> {
             String sql = "SELECT version, description, filename, checksum, applied_at, execution_ms"
-                    + " FROM " + HISTORY_TABLE;
+                    + " FROM " + historyTable;
             try (PreparedStatement ps = connection.prepareStatement(sql);
                  ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -277,7 +309,7 @@ public class MigrationRunner {
         ensureHistoryTable();
         if (!applied().isEmpty()) {
             throw new IllegalStateException(
-                    "Cannot baseline: " + HISTORY_TABLE + " already has rows. "
+                    "Cannot baseline: " + historyTable + " already has rows. "
                             + "Baselining is only for a database that has never been migrated.");
         }
         String name = "V" + version + "__baseline";
@@ -308,7 +340,7 @@ public class MigrationRunner {
     public void ensureHistoryTable() {
         withTransaction(connection -> {
             try (Statement stmt = connection.createStatement()) {
-                stmt.execute("CREATE TABLE IF NOT EXISTS " + HISTORY_TABLE + " ("
+                stmt.execute("CREATE TABLE IF NOT EXISTS " + historyTable + " ("
                         + "version VARCHAR(128) NOT NULL, "
                         + "description VARCHAR(512), "
                         + "filename VARCHAR(512) NOT NULL, "
@@ -321,7 +353,7 @@ public class MigrationRunner {
     }
 
     private void record(Connection connection, Available migration, long startedAt) throws SQLException {
-        String sql = "INSERT INTO " + HISTORY_TABLE
+        String sql = "INSERT INTO " + historyTable
                 + " (version, description, filename, checksum, applied_at, execution_ms)"
                 + " VALUES (?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {

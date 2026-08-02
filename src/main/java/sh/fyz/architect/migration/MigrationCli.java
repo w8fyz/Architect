@@ -61,6 +61,17 @@ public final class MigrationCli {
     /** Streams are injectable so tests can assert on output without capturing System.out. */
     public static int run(Architect architect, Path migrationDirectory, String[] args,
                           PrintStream out, PrintStream err) {
+        return run(architect, migrationDirectory, MigrationRunner.HISTORY_TABLE, args, out, err);
+    }
+
+    /**
+     * Same, with the migration stream's history table spelled out — for a database
+     * hosting several independent streams. See
+     * {@link MigrationRunner#MigrationRunner(Architect, Path, String)} for the
+     * naming constraint.
+     */
+    public static int run(Architect architect, Path migrationDirectory, String historyTable,
+                          String[] args, PrintStream out, PrintStream err) {
         if (args == null || args.length == 0) {
             usage(out);
             return EXIT_OK;
@@ -83,7 +94,7 @@ public final class MigrationCli {
                 }
             }
 
-            MigrationRunner runner = new MigrationRunner(architect, migrationDirectory);
+            MigrationRunner runner = new MigrationRunner(architect, migrationDirectory, historyTable);
             return switch (args[0]) {
                 case "status" -> status(runner, out);
                 case "verify" -> verify(runner, out, err);
