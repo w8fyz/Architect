@@ -169,6 +169,8 @@ new RedisCredentials("localhost", "password", 6379, 2000, 10, /* defaultTtlSecon
 
 Per-key TTL overrides are still possible via `RedisManager.get().setTTL(key, seconds)`.
 
+For direct Redis access, `RedisManager.get().getRedisClient()` returns the Jedis `RedisClient` Architect uses. Architect's own keys are prefixed `architect:`; the client does not add the prefix, so include it yourself.
+
 > **With a TTL, `GenericCachedRepository` queries can return partial results.** `all()`, `query()...findAll()` and `count()` treat a non-empty cache as the whole table, so once some keys have expired they answer from the entries that are left. Use a TTL only if you read cached entities by id, or use a plain `GenericRepository` for those queries.
 
 ## Repositories

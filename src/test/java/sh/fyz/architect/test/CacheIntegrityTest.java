@@ -2,7 +2,10 @@ package sh.fyz.architect.test;
 
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.*;
-import redis.clients.jedis.Jedis;
+import redis.clients.jedis.BuilderFactory;
+import redis.clients.jedis.CommandArguments;
+import redis.clients.jedis.CommandObject;
+import redis.clients.jedis.Protocol;
 import sh.fyz.architect.Architect;
 import sh.fyz.architect.cache.EntityChannelPubSub;
 import sh.fyz.architect.cache.RedisCredentials;
@@ -80,17 +83,13 @@ public class CacheIntegrityTest {
         for (Gadget g : db.all()) {
             db.delete(g);
         }
-        try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
-            for (String key : jedis.keys("architect:*")) {
-                jedis.del(key);
-            }
+        for (String key : RedisManager.get().getRedisClient().keys("architect:*")) {
+            RedisManager.get().getRedisClient().del(key);
         }
     }
 
     private boolean inRedis(String key) {
-        try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
-            return jedis.exists("architect:" + key);
-        }
+        return RedisManager.get().getRedisClient().exists("architect:" + key);
     }
 
     /**
@@ -261,11 +260,12 @@ public class CacheIntegrityTest {
         // Subscribes this receiver to the Gadget channel, asynchronously.
         new GenericRelayRepository<>(Gadget.class);
         EntityChannelPubSub<Gadget> channel = new EntityChannelPubSub<>(Gadget.class);
-        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> {
-            try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
-                return jedis.pubsubNumSub("database-action:Gadget").getOrDefault("database-action:Gadget", 0L) > 0;
-            }
-        });
+        String channelName = "database-action:Gadget";
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> RedisManager.get().getRedisClient()
+                .executeCommand(new CommandObject<>(
+                        new CommandArguments(Protocol.Command.PUBSUB).add("NUMSUB").add(channelName),
+                        BuilderFactory.PUBSUB_NUMSUB_MAP))
+                .getOrDefault(channelName, 0L) > 0);
 
         Gadget g = db.save(new Gadget("relayed", "x", 1, Gadget.Kind.SMALL));
         // A non-receiver keeps relaying the copy it read, whose version never moves.

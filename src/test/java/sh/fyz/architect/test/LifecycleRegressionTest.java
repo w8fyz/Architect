@@ -5,6 +5,12 @@ import org.awaitility.Awaitility;
 import org.hibernate.engine.jdbc.connections.spi.ConnectionProvider;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.junit.jupiter.api.*;
+import redis.clients.jedis.BuilderFactory;
+import redis.clients.jedis.CommandArguments;
+import redis.clients.jedis.CommandObject;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.Protocol;
+import redis.clients.jedis.RedisClient;
 import sh.fyz.architect.Architect;
 import sh.fyz.architect.cache.EntityChannelPubSub;
 import sh.fyz.architect.cache.RedisCredentials;
@@ -147,9 +153,15 @@ public class LifecycleRegressionTest {
     }
 
     private long subscriberCount() {
-        try (var jedis = new redis.clients.jedis.Jedis(REDIS_HOST, REDIS_PORT)) {
-            jedis.auth(REDIS_PASS);
-            return jedis.pubsubNumSub(CHANNEL).getOrDefault(CHANNEL, 0L);
+        // A client of its own: the count is also read after Architect has stopped.
+        try (RedisClient client = RedisClient.builder()
+                .hostAndPort(REDIS_HOST, REDIS_PORT)
+                .clientConfig(DefaultJedisClientConfig.builder().password(REDIS_PASS).build())
+                .build()) {
+            return client.executeCommand(new CommandObject<>(
+                    new CommandArguments(Protocol.Command.PUBSUB).add("NUMSUB").add(CHANNEL),
+                    BuilderFactory.PUBSUB_NUMSUB_MAP))
+                    .getOrDefault(CHANNEL, 0L);
         }
     }
 

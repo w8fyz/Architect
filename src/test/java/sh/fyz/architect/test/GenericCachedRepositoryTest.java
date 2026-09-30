@@ -69,11 +69,10 @@ public class GenericCachedRepositoryTest {
             tx.commit();
         }
 
-        try (var jedis = sh.fyz.architect.cache.RedisManager.get().getJedisPool().getResource()) {
-            var keys = jedis.keys("architect:Product:*");
-            if (!keys.isEmpty()) {
-                jedis.del(keys.toArray(new String[0]));
-            }
+        var redis = sh.fyz.architect.cache.RedisManager.get().getRedisClient();
+        var keys = redis.keys("architect:Product:*");
+        if (!keys.isEmpty()) {
+            redis.del(keys.toArray(new String[0]));
         }
     }
 

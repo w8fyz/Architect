@@ -4,8 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.hibernate.Session;
-import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
+import redis.clients.jedis.RedisClient;
 import redis.clients.jedis.exceptions.JedisException;
 import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
@@ -50,9 +50,7 @@ public class EntityChannelPubSub<T> {
     public void publish(DatabaseAction<T> action) {
         try {
             String message = RedisManager.get().getObjectMapper().writeValueAsString(action);
-            try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
-                jedis.publish(channelName, message);
-            }
+            RedisManager.get().getRedisClient().publish(channelName, message);
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to serialize database action for pub/sub", e);
         }
@@ -79,7 +77,7 @@ public class EntityChannelPubSub<T> {
     private void subscribeLoop(RedisManager manager) {
         long backoff = INITIAL_BACKOFF_MS;
         while (manager.isAlive()) {
-            try (Jedis jedis = manager.openSubscriberConnection()) {
+            try (RedisClient subscriber = manager.openSubscriberClient()) {
                 JedisPubSub pubSub = new JedisPubSub() {
                     @Override
                     public void onMessage(String channel, String message) {
@@ -95,7 +93,7 @@ public class EntityChannelPubSub<T> {
                     }
                 };
                 activeSubscription = pubSub;
-                jedis.subscribe(pubSub, channelName);
+                subscriber.subscribe(pubSub, channelName);
                 backoff = INITIAL_BACKOFF_MS;
             } catch (JedisException e) {
                 if (!manager.isAlive()) {
@@ -138,7 +136,7 @@ public class EntityChannelPubSub<T> {
     }
 
     /**
-     * Unblocks the blocking {@code jedis.subscribe}. Called by {@link RedisManager#shutdown()}
+     * Unblocks the blocking {@code subscribe}. Called by {@link RedisManager#shutdown()}
      * after it clears the {@code isAlive} flag, so the loop then exits instead of resubscribing.
      */
     public void unsubscribe() {

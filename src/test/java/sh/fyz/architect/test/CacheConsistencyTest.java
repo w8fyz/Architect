@@ -2,7 +2,6 @@ package sh.fyz.architect.test;
 
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.*;
-import redis.clients.jedis.Jedis;
 import sh.fyz.architect.Architect;
 import sh.fyz.architect.cache.RedisCredentials;
 import sh.fyz.architect.cache.RedisManager;
@@ -74,10 +73,8 @@ public class CacheConsistencyTest {
             db.delete(g);
         }
         // Rows deleted behind the cache's back: drop whatever the previous test left in Redis.
-        try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
-            for (String key : jedis.keys("architect:Gadget:*")) {
-                jedis.del(key);
-            }
+        for (String key : RedisManager.get().getRedisClient().keys("architect:Gadget:*")) {
+            RedisManager.get().getRedisClient().del(key);
         }
         db.save(new Gadget("a", "books", 1, Gadget.Kind.SMALL));
         db.save(new Gadget("b", null, null, Gadget.Kind.LARGE));

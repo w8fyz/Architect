@@ -33,7 +33,7 @@ src/main/java/sh/fyz/architect/
 │   └── MigrationToolGUI.java             # Swing GUI (dev tool, not for programmatic use)
 ├── cache/
 │   ├── RedisCredentials.java               # Redis config value object
-│   ├── RedisManager.java                   # Jedis singleton, keys prefixed architect:
+│   ├── RedisManager.java                   # Redis client (Jedis RedisClient) singleton, keys prefixed architect:
 │   ├── RedisQueueActionPool.java           # Async flush queue for cached repos
 │   └── EntityChannelPubSub.java            # Pub/sub per entity type
 └── repositories/
