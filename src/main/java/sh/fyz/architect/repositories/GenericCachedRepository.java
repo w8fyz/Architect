@@ -7,6 +7,7 @@ import sh.fyz.architect.cache.RedisManager;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
+import jakarta.persistence.Version;
 
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -30,6 +31,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private static final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>> FIELD_LOOKUP_CACHE =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, List<RelationField>> RELATION_FIELDS_CACHE = new ConcurrentHashMap<>();
+    // Optional because ConcurrentHashMap cannot hold null, and "no @Version field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> VERSION_FIELD_CACHE = new ConcurrentHashMap<>();
 
     /** A relation-annotated field, with what resolving it needs precomputed. */
     private record RelationField(Field field, boolean oneToMany, Class<?> elementType, String repositoryName) {}
@@ -87,13 +90,17 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public void delete(T entity) {
-        String key = cacheKeyPrefix + entity.getId();
-        RedisManager.get().delete(key);
+        evictFromCache(entity.getId());
         if (RedisManager.get().isReceiver()) {
             updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
         } else {
             super.delete(entity);
         }
+    }
+
+    /** Removes one entity from Redis, leaving the database alone. */
+    protected void evictFromCache(Object id) {
+        RedisManager.get().delete(cacheKeyPrefix + id);
     }
 
     private List<T> getAllFromCache() {
@@ -169,9 +176,12 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 for (DatabaseAction<T> item : batch) {
                     T entity = item.getEntity();
                     switch (item.getType()) {
-                        // Merging a detached entity whose row was deleted, or whose @Version is
-                        // behind the database, throws an optimistic-lock exception.
-                        case SAVE -> session.merge(entity);
+                        // Merging a detached entity whose row was deleted throws an
+                        // optimistic-lock exception (see alignVersion for @Version entities).
+                        case SAVE -> {
+                            alignVersion(session, entity);
+                            session.merge(entity);
+                        }
                         case DELETE -> {
                             // A null id was never persisted, so there is no row to delete.
                             T managed = entity.getId() == null ? null : session.find(type, entity.getId());
@@ -193,6 +203,39 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 }
                 throw e;
             }
+        }
+    }
+
+    /**
+     * Gives a {@code @Version} entity the version its row currently has. The copy saved here
+     * and served back from Redis keeps the version it was read with, while every flush
+     * increments the row's: without this, each save after the first would fail the version
+     * check and be dropped as stale. The cache is last-writer-wins, like for unversioned
+     * entities. A deleted row is left alone, so its merge still fails and is dropped.
+     */
+    private void alignVersion(Session session, T entity) {
+        Field versionField = VERSION_FIELD_CACHE.computeIfAbsent(entity.getClass(), c -> {
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field f : current.getDeclaredFields()) {
+                    if (f.isAnnotationPresent(Version.class)) {
+                        f.setAccessible(true);
+                        return Optional.of(f);
+                    }
+                }
+            }
+            return Optional.empty();
+        }).orElse(null);
+        if (versionField == null || entity.getId() == null) {
+            return;
+        }
+        T current = session.find(type, entity.getId());
+        if (current == null) {
+            return;
+        }
+        try {
+            versionField.set(entity, versionField.get(current));
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot access @Version field of " + type.getSimpleName(), e);
         }
     }
 
@@ -237,6 +280,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
+        validateQueryFields(builder);
         if (builder.hasRawConditions()) {
             return super.executeQueryWithLimit(builder, explicitLimit);
         }
@@ -278,6 +322,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected long executeCount(QueryBuilder<T> builder) {
+        validateQueryFields(builder);
         if (builder.hasRawConditions()) {
             return super.executeCount(builder);
         }
@@ -298,49 +343,123 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected int executeDelete(QueryBuilder<T> builder) {
+        validateQueryFields(builder);
         List<Object> matchedIds = new ArrayList<>();
-        List<T> cached = getAllFromCache();
-        if (cached != null) {
-            for (T entity : cached) {
-                boolean matches = true;
-                for (QueryBuilder.Condition c : builder.getConditions()) {
-                    if (!matchesCondition(entity, c)) {
-                        matches = false;
-                        break;
-                    }
-                }
-                if (matches && entity.getId() != null) {
+        if (builder.hasRawConditions()) {
+            // Raw HQL cannot be evaluated in memory, and evicting on the other conditions alone
+            // would drop rows that stay in the database from a cache that queries treat as the
+            // whole table. Ask the database which rows the delete will remove.
+            for (T entity : findAllMatching(builder)) {
+                if (entity.getId() != null) {
                     matchedIds.add(entity.getId());
+                }
+            }
+        } else {
+            List<T> cached = getAllFromCache();
+            if (cached != null) {
+                for (T entity : cached) {
+                    boolean matches = true;
+                    for (QueryBuilder.Condition c : builder.getConditions()) {
+                        if (!matchesCondition(entity, c)) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    if (matches && entity.getId() != null) {
+                        matchedIds.add(entity.getId());
+                    }
                 }
             }
         }
 
         int deleted = super.executeDelete(builder);
         for (Object id : matchedIds) {
-            RedisManager.get().delete(cacheKeyPrefix + id);
+            evictFromCache(id);
         }
         return deleted;
     }
 
     // --- IN-MEMORY CONDITION MATCHING ---
 
+    /**
+     * Evaluates a condition the way the database would, so that a warm cache returns the same
+     * rows: under SQL's three-valued logic a comparison involving NULL is never true (only
+     * IS NULL / IS NOT NULL test for it), and numbers compare by value, not by boxed type.
+     */
     private boolean matchesCondition(T entity, QueryBuilder.Condition condition) {
         Object fieldValue = getFieldValue(entity, condition.field());
         Object condValue = condition.value();
 
+        switch (condition.operator()) {
+            case IS_NULL:
+                return fieldValue == null;
+            case IS_NOT_NULL:
+                return fieldValue != null;
+            case NOT_IN:
+                if (condValue instanceof Collection<?> c && c.isEmpty()) {
+                    return true;
+                }
+                break;
+            default:
+                break;
+        }
+        if (fieldValue == null || condValue == null) {
+            return false;
+        }
+
         return switch (condition.operator()) {
-            case EQ -> Objects.equals(fieldValue, condValue);
-            case NEQ -> !Objects.equals(fieldValue, condValue);
+            case EQ -> valuesEqual(fieldValue, condValue);
+            case NEQ -> !valuesEqual(fieldValue, condValue);
             case GT -> compareValues(fieldValue, condValue) > 0;
             case GTE -> compareValues(fieldValue, condValue) >= 0;
             case LT -> compareValues(fieldValue, condValue) < 0;
             case LTE -> compareValues(fieldValue, condValue) <= 0;
             case LIKE -> matchesLike(fieldValue, condValue);
-            case IN -> condValue instanceof Collection<?> c && c.contains(fieldValue);
-            case NOT_IN -> !(condValue instanceof Collection<?> c && c.contains(fieldValue));
-            case IS_NULL -> fieldValue == null;
-            case IS_NOT_NULL -> fieldValue != null;
+            case IN -> condValue instanceof Collection<?> c
+                    && c.stream().anyMatch(v -> v != null && valuesEqual(fieldValue, v));
+            // x NOT IN (..., NULL) is never true in SQL.
+            // contains(null) would throw on List.of / Set.of.
+            case NOT_IN -> condValue instanceof Collection<?> c && c.stream().noneMatch(Objects::isNull)
+                    && c.stream().noneMatch(v -> valuesEqual(fieldValue, v));
+            case IS_NULL, IS_NOT_NULL -> throw new IllegalStateException("handled above");
         };
+    }
+
+    private static boolean valuesEqual(Object a, Object b) {
+        if (a instanceof Number na && b instanceof Number nb) {
+            return compareNumbers(na, nb) == 0;
+        }
+        return Objects.equals(a, b);
+    }
+
+    private static int compareNumbers(Number a, Number b) {
+        if (isIntegral(a) && isIntegral(b)) {
+            return Long.compare(a.longValue(), b.longValue());
+        }
+        if (isFloating(a) && isFloating(b)) {
+            return Double.compare(a.doubleValue(), b.doubleValue());
+        }
+        // Mixed or arbitrary-precision operands: a double would round large longs and
+        // BigDecimals, making distinct values compare equal.
+        try {
+            return toBigDecimal(a).compareTo(toBigDecimal(b));
+        } catch (NumberFormatException e) {
+            return Double.compare(a.doubleValue(), b.doubleValue()); // NaN / Infinity
+        }
+    }
+
+    private static boolean isFloating(Number n) {
+        return n instanceof Double || n instanceof Float;
+    }
+
+    private static java.math.BigDecimal toBigDecimal(Number n) {
+        if (n instanceof java.math.BigDecimal bd) return bd;
+        if (n instanceof java.math.BigInteger bi) return new java.math.BigDecimal(bi);
+        return new java.math.BigDecimal(n.toString());
+    }
+
+    private static boolean isIntegral(Number n) {
+        return n instanceof Long || n instanceof Integer || n instanceof Short || n instanceof Byte;
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -348,7 +467,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         if (a == null || b == null) return 0;
 
         if (a instanceof Number na && b instanceof Number nb) {
-            return Double.compare(na.doubleValue(), nb.doubleValue());
+            return compareNumbers(na, nb);
         }
 
         if (a instanceof Comparable ca && a.getClass().isAssignableFrom(b.getClass())) {
@@ -366,7 +485,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             String regex = "^" + Pattern.quote(p)
                 .replace("%", "\\E.*\\Q")
                 .replace("_", "\\E.\\Q") + "$";
-            return Pattern.compile(regex);
+            // DOTALL: SQL's % and _ match line breaks too.
+            return Pattern.compile(regex, Pattern.DOTALL);
         });
         return compiled.matcher(value).matches();
     }

@@ -27,6 +27,14 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
     @Override
     public T save(T entity) {
         if (!RedisManager.get().isReceiver()) {
+            // Checked before publishing: once published, the receiver would create the entity
+            // even though this call fails, and a caller retrying it would create duplicates.
+            if (entity.getId() == null) {
+                throw new UnsupportedOperationException(
+                    "Cannot create new entities (null ID) on a non-receiver instance. " +
+                    "New entities must be created on the receiver."
+                );
+            }
             channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
         }
         return super.save(entity);
@@ -44,10 +52,15 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
 
     @Override
     public void delete(T entity) {
-        if (!RedisManager.get().isReceiver()) {
-            channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+        if (RedisManager.get().isReceiver()) {
+            super.delete(entity);
+            return;
         }
-        super.delete(entity);
+        // The receiver deletes the row; this instance only drops its cached copy. Deleting from
+        // the database here too would fail on a Redis-only instance after the delete was
+        // already relayed.
+        channelPubSub.publish(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+        evictFromCache(entity.getId());
     }
 
     @Override

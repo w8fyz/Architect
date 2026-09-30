@@ -19,6 +19,11 @@ public class H2Auth extends SQLAuthProvider {
         this.database = database;
     }
 
+    /**
+     * Any mode other than {@link TlsMode#DISABLE} selects H2's {@code ssl} transport, which
+     * verifies the certificate chain against the JVM truststore but not the hostname:
+     * {@link TlsMode#VERIFY_FULL} gives the same guarantees as {@link TlsMode#VERIFY_CA}.
+     */
     public H2Auth withTls(TlsMode mode) {
         if (mode == null) throw new IllegalArgumentException("TlsMode must not be null");
         this.tlsMode = mode;

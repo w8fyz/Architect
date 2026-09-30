@@ -1,6 +1,7 @@
 package sh.fyz.architect.cache;
 
 import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistent.SessionManager;
 import sh.fyz.architect.repositories.GenericCachedRepository;
 import sh.fyz.architect.repositories.GenericRepository;
@@ -101,7 +102,14 @@ public class RedisQueueActionPool {
                     .convertValue(action.getEntity(), entityClass);
                 switch (action.getType()) {
                     case SAVE -> repository.save(entity);
-                    case DELETE -> repository.delete(entity);
+                    case DELETE -> {
+                        repository.delete(entity);
+                        // The sender evicted its cached copy, but a read in the meantime may have
+                        // cached the row again: evict once the row is really gone.
+                        if (entity instanceof IdentifiableEntity identifiable && identifiable.getId() != null) {
+                            RedisManager.get().delete(className + ":" + identifiable.getId());
+                        }
+                    }
                 }
             } catch (Exception e) {
                 LOG.warning("Error processing pub/sub action: " + e.getMessage());

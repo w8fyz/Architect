@@ -126,7 +126,7 @@ architect.start();
 | `H2Auth` | `(host, port, database)` |
 | `SQLiteAuth` | `(databasePath)` |
 
-Hostname and database identifiers are validated against `[A-Za-z0-9._-]` to prevent JDBC URL injection. SQLite paths are normalized and reject URL schemes / illegal characters.
+Hostname and database are only checked for being non-blank (and the port for its range): they are concatenated into the JDBC URL as-is, so they must come from trusted configuration, never from user input. SQLite paths are normalized and reject URL schemes / illegal characters.
 
 #### TLS
 
@@ -137,7 +137,11 @@ new PostgreSQLAuth("db.example.com", 5432, "app").withTls(TlsMode.REQUIRE)
 new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
 ```
 
-`TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters.
+`TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters. Dialect notes:
+
+- **PostgreSQL**: `DISABLE` adds no `sslmode` parameter, so the pgjdbc default (`prefer`) applies.
+- **MariaDB**: the legacy `useSsl` options are used, which Connector/J 2.x and 3.x both understand (3.x logs a deprecation notice). There is no opportunistic mode, so `PREFER` requires TLS like `REQUIRE`.
+- **H2**: every mode other than `DISABLE` uses `jdbc:h2:ssl://`, which checks the certificate chain against the JVM truststore but not the hostname — `VERIFY_FULL` behaves like `VERIFY_CA`.
 
 ### DatabaseCredentials
 
@@ -162,6 +166,8 @@ new RedisCredentials("localhost", "password", 6379, 2000, 10, /* defaultTtlSecon
 ```
 
 Per-key TTL overrides are still possible via `RedisManager.get().setTTL(key, seconds)`.
+
+> **With a TTL, `GenericCachedRepository` queries can return partial results.** `all()`, `query()...findAll()` and `count()` treat a non-empty cache as the whole table, so once some keys have expired they answer from the entries that are left. Use a TTL only if you read cached entities by id, or use a plain `GenericRepository` for those queries.
 
 ## Repositories
 
@@ -193,7 +199,7 @@ Redis-first reads. Falls back to database on cache miss, then populates the cach
 GenericCachedRepository<User> users = new GenericCachedRepository<>(User.class);
 ```
 
-Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache.
+Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache. Collection relations of a cached entity must be fetched eagerly (`FetchType.EAGER`): entities are cached after their session is closed, where a lazy collection cannot be read.
 
 ### GenericRelayRepository
 
@@ -209,6 +215,8 @@ architect.start();
 GenericRelayRepository<User> users = new GenericRelayRepository<>(User.class);
 users.save(user); // sent via Redis pub/sub to the receiver
 ```
+
+A non-receiver can only save entities that already have an id; new entities are created on the receiver.
 
 ### Custom Repositories
 

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.*;
 import sh.fyz.architect.diffmodel.DiffFixtures.*;
 import sh.fyz.architect.migration.SchemaDiff;
 import sh.fyz.architect.migration.ShadowDatabase;
+import sh.fyz.architect.persistent.EnumCheckConstraintSynchronizer;
 import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 import sh.fyz.architect.persistent.sql.provider.PostgreSQLAuth;
 
@@ -191,7 +192,57 @@ public class SchemaDiffTest {
         assertTrue(second.isEmpty(), "must converge: " + second.additive() + second.removals());
     }
 
+    @Test
+    @Order(15)
+    @DisplayName("colonne raccourcie : jamais appliquee telle quelle, signalee en type change")
+    void testNarrowedColumnIsNotAdditive() throws Exception {
+        applyAdditive(diff(ItemV1.class));
+
+        SchemaDiff.Result result = diff(ItemNarrowed.class);
+        assertTrue(result.additive().isEmpty(),
+                "shrinking varchar(64) to varchar(32) can truncate data: " + result.additive());
+        assertTrue(result.typeChanges().stream().anyMatch(t -> t.column().equals("label")),
+                "expected a type change on label, got: " + result.typeChanges());
+
+        String sql = SchemaDiff.toSql(result, "V9__narrow.sql", "now");
+        for (String line : sql.split("\n")) {
+            if (line.toLowerCase().contains("alter column")) {
+                assertTrue(line.trim().startsWith("--"), "type changes must be commented out: " + line);
+            }
+        }
+    }
+
     // ── Enums ────────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(22)
+    @DisplayName("contraintes enum d'un snapshot : rejouables apres le CREATE TABLE")
+    void testSnapshotEnumConstraintsReplay() throws Exception {
+        applyAdditive(diff(EnumHolderV1.class));
+        List<String> ddl = EnumCheckConstraintSynchronizer.generateEnumConstraintsDDL(
+                List.of(EnumHolderV1.class), provider.getDialect());
+        assertFalse(ddl.isEmpty());
+        // Hibernate's CREATE TABLE already carries the inline CHECK: a bare ADD would fail here.
+        exec(ddl.toArray(new String[0]));
+        exec(ddl.toArray(new String[0]));
+        assertTrue(diff(EnumHolderV1.class).isEmpty());
+    }
+
+    @Test
+    @Order(23)
+    @DisplayName("enum ORDINAL : convergence, puis extension de la plage")
+    void testOrdinalEnum() throws Exception {
+        applyAdditive(diff(OrdinalHolderV1.class));
+        assertTrue(diff(OrdinalHolderV1.class).isEmpty(),
+                "an unchanged ordinal enum must not be regenerated on every diff");
+
+        SchemaDiff.Result result = diff(OrdinalHolderV2.class);
+        assertFalse(result.enumConstraints().isEmpty(), "adding ARCHIVED must widen the range");
+        applyAdditive(result);
+        assertTrue(diff(OrdinalHolderV2.class).isEmpty(), "must converge after applying");
+    }
+
+    // ── Enums (value sets) ───────────────────────────────────────────────────
 
     @Test
     @Order(20)

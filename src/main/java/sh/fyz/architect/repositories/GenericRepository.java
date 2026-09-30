@@ -20,6 +20,9 @@ public class GenericRepository<T> {
     protected final Class<T> type;
 
     private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
+    // Names of the builder's own parameters. Unusual on purpose: a whereRaw() parameter with the
+    // same name would silently overwrite the builder's value (or be overwritten by it).
+    private static final String PARAM_PREFIX = "__architect_p";
     // Optional because ConcurrentHashMap cannot hold null, and "no id field" must be cached too.
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
 
@@ -222,6 +225,18 @@ public class GenericRepository<T> {
      * for concurrent callers).
      */
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
+        return select(builder, explicitLimit, builder.getOffset());
+    }
+
+    /**
+     * Every row matching the builder's conditions, limit and offset ignored — the rows its
+     * {@link QueryBuilder#delete()} removes.
+     */
+    protected List<T> findAllMatching(QueryBuilder<T> builder) {
+        return select(builder, -1, 0);
+    }
+
+    private List<T> select(QueryBuilder<T> builder, int limit, int offset) {
         validateQueryFields(builder);
 
         try (Session session = openReadOnlySession()) {
@@ -229,11 +244,11 @@ public class GenericRepository<T> {
             Query<T> query = session.createQuery(hql, type);
             bindParameters(query, builder);
 
-            if (explicitLimit > 0) {
-                query.setMaxResults(explicitLimit);
+            if (limit > 0) {
+                query.setMaxResults(limit);
             }
-            if (builder.getOffset() > 0) {
-                query.setFirstResult(builder.getOffset());
+            if (offset > 0) {
+                query.setFirstResult(offset);
             }
 
             return query.list();
@@ -255,8 +270,8 @@ public class GenericRepository<T> {
     protected int executeDelete(QueryBuilder<T> builder) {
         validateQueryFields(builder);
 
-        if (builder.getConditions().isEmpty()) {
-            throw new IllegalStateException("Cannot execute delete without conditions. Use deleteAll() or add at least one where clause.");
+        if (builder.getConditions().isEmpty() && builder.getRawConditions().isEmpty()) {
+            throw new IllegalStateException("Cannot execute delete without conditions. Add at least one where clause.");
         }
 
         try (Session session = SessionManager.get().getSession()) {
@@ -302,7 +317,7 @@ public class GenericRepository<T> {
         for (int i = 0; i < conditions.size(); i++) {
             if (clauseIndex > 0) where.append(" AND ");
             QueryBuilder.Condition c = conditions.get(i);
-            String param = "p" + i;
+            String param = PARAM_PREFIX + i;
             where.append(switch (c.operator()) {
                 case EQ -> c.field() + " = :" + param;
                 case NEQ -> c.field() + " <> :" + param;
@@ -356,7 +371,7 @@ public class GenericRepository<T> {
         for (int i = 0; i < conditions.size(); i++) {
             QueryBuilder.Condition c = conditions.get(i);
             if (c.operator() != QueryBuilder.Operator.IS_NULL && c.operator() != QueryBuilder.Operator.IS_NOT_NULL) {
-                query.setParameter("p" + i, c.value());
+                query.setParameter(PARAM_PREFIX + i, c.value());
             }
         }
 
@@ -367,7 +382,7 @@ public class GenericRepository<T> {
         }
     }
 
-    private void validateQueryFields(QueryBuilder<T> builder) {
+    protected void validateQueryFields(QueryBuilder<T> builder) {
         for (QueryBuilder.Condition c : builder.getConditions()) {
             validateFieldName(c.field());
         }

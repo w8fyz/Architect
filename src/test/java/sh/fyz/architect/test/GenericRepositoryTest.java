@@ -653,6 +653,35 @@ public class GenericRepositoryTest {
     }
 
     @Test
+    @Order(114)
+    @DisplayName("query().whereRaw() - Un parametre nomme p0 n'entre pas en conflit avec le builder")
+    void testQueryWhereRawParameterNamesDoNotCollide() {
+        repository.save(new Product("Wanted", "Books", 10.0, 1, true));
+        repository.save(new Product("Other", "Books", 10.0, 1, true));
+
+        List<Product> result = repository.query()
+            .where("category", "Books")
+            .whereRaw("name = :p0", Map.of("p0", "Wanted"))
+            .findAll();
+
+        assertEquals(1, result.size());
+        assertEquals("Wanted", result.get(0).getName());
+    }
+
+    @Test
+    @Order(115)
+    @DisplayName("query().whereRaw().delete() - Une condition brute suffit")
+    void testQueryDeleteWithRawConditionOnly() {
+        repository.save(new Product("Cheap", "Cat", 5.0, 1, true));
+        repository.save(new Product("Expensive", "Cat", 500.0, 1, true));
+
+        int deleted = repository.query().whereRaw("price > :min", Map.of("min", 100.0)).delete();
+
+        assertEquals(1, deleted);
+        assertEquals(1, repository.query().count());
+    }
+
+    @Test
     @Order(120)
     @DisplayName("Validation - Nom de champ invalide dans where()")
     void testValidationInvalidFieldWhere() {

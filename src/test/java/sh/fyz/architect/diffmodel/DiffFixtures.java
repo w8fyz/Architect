@@ -78,6 +78,33 @@ public final class DiffFixtures {
         @Override public Object getId() { return id; }
     }
 
+    /** {@link ItemV1} with a shorter label: shrinking a column can truncate data. */
+    @Entity
+    @Table(name = "diff_item")
+    public static class ItemNarrowed implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        @Column(name = "label", length = 32) public String label;
+        @Override public Object getId() { return id; }
+    }
+
+    /** ORDINAL enum: PostgreSQL stores its CHECK as a range, not a value list. */
+    @Entity
+    @Table(name = "diff_ordinal_holder")
+    public static class OrdinalHolderV1 implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        @Column(name = "status") @Enumerated(EnumType.ORDINAL) public Status status;
+        @Override public Object getId() { return id; }
+    }
+
+    /** {@link OrdinalHolderV1} with one more enum constant. */
+    @Entity
+    @Table(name = "diff_ordinal_holder")
+    public static class OrdinalHolderV2 implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        @Column(name = "status") @Enumerated(EnumType.ORDINAL) public StatusExtended status;
+        @Override public Object getId() { return id; }
+    }
+
     /** {@link EnumHolderV1} with one more enum constant. */
     @Entity
     @Table(name = "diff_enum_holder")

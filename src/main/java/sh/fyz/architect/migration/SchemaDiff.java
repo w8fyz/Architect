@@ -35,6 +35,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Computes the SQL that brings a target database up to the current entity model.
@@ -116,13 +118,18 @@ public class SchemaDiff {
             }
             Metadata metadata = sources.buildMetadata();
 
-            List<String> additive = additivePass(registry, settings, metadata);
+            List<String> additive = new ArrayList<>();
+            List<String> columnTypeAlters = new ArrayList<>();
+            for (String statement : additivePass(registry, settings, metadata)) {
+                (ALTER_COLUMN_TYPE.matcher(statement).find() ? columnTypeAlters : additive).add(statement);
+            }
             Map<String, Set<String>> model = modelTables(metadata);
             Map<String, Map<String, String>> live = liveTables();
 
             List<Removal> removals = new ArrayList<>();
             List<TypeChange> typeChanges = new ArrayList<>();
             destructivePass(model, live, metadata, removals, typeChanges);
+            migratorTypeChanges(columnTypeAlters, live, metadata, typeChanges);
 
             List<RenameHint> hints = renameHints(removals, additive);
             List<String> enums = enumConstraintDelta();
@@ -224,6 +231,77 @@ public class SchemaDiff {
         SchemaMigrator migrator = tool.getSchemaMigrator(settings);
         migrator.doMigration(metadata, options, ContributableMatcher.ALL, descriptor);
         return collected;
+    }
+
+    /**
+     * An {@code ALTER COLUMN ... TYPE} (PostgreSQL, H2) or {@code MODIFY COLUMN} (MySQL, MariaDB)
+     * from Hibernate's migrator. It emits one whenever a column's type <em>or length/precision</em>
+     * differs from the model — narrowing {@code numeric(19,4)} to {@code numeric(10,2)} silently
+     * rounds stored values, shortening a {@code varchar} fails or truncates — so these are type
+     * changes, never additions. Groups: table, column.
+     */
+    private static final Pattern ALTER_COLUMN_TYPE = Pattern.compile(
+            "^\\s*alter\\s+table\\s+(?:if\\s+exists\\s+)?(\\S+)\\s+(?:alter\\s+column|modify(?:\\s+column)?)\\s+(\\S+)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Moves the migrator's column type alterations to the type changes, with the migrator's
+     * (dialect-correct) statement.
+     */
+    private void migratorTypeChanges(List<String> statements,
+                                     Map<String, Map<String, String>> live,
+                                     Metadata metadata,
+                                     List<TypeChange> typeChanges) {
+        for (String statement : statements) {
+            Matcher m = ALTER_COLUMN_TYPE.matcher(statement);
+            if (!m.find()) {
+                continue;
+            }
+            String table = unquoteLast(m.group(1));
+            String column = unquoteLast(m.group(2));
+            // Already reported: keep its from/to, but take Hibernate's statement, which is in
+            // the dialect's own syntax.
+            TypeChange reported = typeChanges.stream()
+                    .filter(t -> t.table().equals(table) && t.column().equals(column))
+                    .findFirst().orElse(null);
+            if (reported != null) {
+                typeChanges.set(typeChanges.indexOf(reported), new TypeChange(table, column,
+                        reported.from(), reported.to(), statement.trim()));
+                continue;
+            }
+            Map<String, String> liveColumns = live.get(table);
+            String from = liveColumns != null ? liveColumns.get(column) : null;
+            String to = modelSqlType(metadata, table, column);
+            typeChanges.add(new TypeChange(table, column,
+                    from != null ? from : "?", to != null ? to : "?", statement.trim()));
+        }
+    }
+
+    /** The model's SQL type for a column, or null if the model has no such column. */
+    private String modelSqlType(Metadata metadata, String table, String column) {
+        for (Namespace namespace : metadata.getDatabase().getNamespaces()) {
+            for (Table t : namespace.getTables()) {
+                if (!t.getName().toLowerCase(Locale.ROOT).equals(table)) {
+                    continue;
+                }
+                for (Column c : t.getColumns()) {
+                    if (c.getName().toLowerCase(Locale.ROOT).equals(column)) {
+                        try {
+                            return c.getSqlType(metadata);
+                        } catch (RuntimeException e) {
+                            return null;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Lowercase last part of a possibly qualified, possibly quoted identifier. */
+    private static String unquoteLast(String identifier) {
+        String last = identifier.substring(identifier.lastIndexOf('.') + 1);
+        return last.replace("\"", "").replace("`", "").toLowerCase(Locale.ROOT);
     }
 
     // ── Pass 2: destructive, by comparison ───────────────────────────────────
@@ -380,8 +458,10 @@ public class SchemaDiff {
             Set.of("bpchar", "char", "character"),
             Set.of("text", "clob"),
             Set.of("bytea", "blob", "varbinary"),
-            Set.of("timestamp", "timestamptz", "timestamp with time zone",
-                   "timestamp without time zone"),
+            // Two groups, not one: timestamp <-> timestamptz is a real change (stored instants
+            // shift by the session time zone), and Hibernate's migrator does not report it.
+            Set.of("timestamp", "timestamp without time zone"),
+            Set.of("timestamptz", "timestamp with time zone"),
             Set.of("numeric", "decimal")
     );
 

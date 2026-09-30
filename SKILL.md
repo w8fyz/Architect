@@ -82,7 +82,7 @@ architect.stop();
 - `(provider, user, pass, poolSize)` — defaults: threadPool=10, hbm2ddl="update"
 - `(provider, user, pass, poolSize, threadPoolSize, hbm2ddlAuto)`
 
-SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are validated against `[A-Za-z0-9._-]`; SQLite paths are normalized.
+SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are only checked for being non-blank and go into the JDBC URL as-is (trusted configuration only); SQLite paths are normalized.
 
 Optional TLS via `withTls(TlsMode)` (network providers only — SQLite throws `UnsupportedOperationException`):
 

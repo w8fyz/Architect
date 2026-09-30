@@ -49,8 +49,9 @@ public class SessionManager {
                 Properties settings = new Properties();
                 settings.put(Environment.JAKARTA_JDBC_DRIVER, authProvider.getDriver());
                 settings.put(Environment.JAKARTA_JDBC_URL, jdbcUrl);
-                settings.put(Environment.JAKARTA_JDBC_USER, user);
-                settings.put(Environment.JAKARTA_JDBC_PASSWORD, password);
+                // Properties rejects null values: a password-less login (or SQLite) leaves them unset.
+                if (user != null) settings.put(Environment.JAKARTA_JDBC_USER, user);
+                if (password != null) settings.put(Environment.JAKARTA_JDBC_PASSWORD, password);
                 settings.put(Environment.DIALECT, authProvider.getDialect());
                 settings.put(Environment.HBM2DDL_AUTO, hbm2ddlAuto != null ? hbm2ddlAuto : "update");
                 settings.put(Environment.SHOW_SQL, "false");
@@ -164,8 +165,12 @@ public class SessionManager {
     public static void reset() {
         synchronized (LOCK) {
             if (instance != null) {
-                instance.close();
-                instance = null;
+                try {
+                    instance.close();
+                } finally {
+                    // Cleared even if closing failed, so that a later initialize() is not refused.
+                    instance = null;
+                }
             }
         }
     }
@@ -197,9 +202,8 @@ public class SessionManager {
     }
 
     public void close() {
-        if (sessionFactory != null) {
-            sessionFactory.close();
-        }
+        // Async repository calls still queued or running need the SessionFactory: let them
+        // finish before closing it, instead of failing them (and losing their writes).
         threadPool.shutdown();
         try {
             if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -208,6 +212,10 @@ public class SessionManager {
         } catch (InterruptedException e) {
             threadPool.shutdownNow();
             Thread.currentThread().interrupt();
+        } finally {
+            if (sessionFactory != null) {
+                sessionFactory.close();
+            }
         }
     }
 

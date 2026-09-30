@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.persistence.Id;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
@@ -14,6 +15,7 @@ import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.params.SetParams;
 import redis.clients.jedis.resps.ScanResult;
 
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
@@ -82,6 +84,13 @@ public class RedisManager {
         this.objectMapper = new ObjectMapper();
         this.objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         this.objectMapper.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+        // java.time values are written as ISO-8601 strings, which convertValue reads back.
+        this.objectMapper.registerModule(new JavaTimeModule());
+        this.objectMapper.configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false);
+        // Cached JSON is read into a Map first: decimals must not pass through double (BigDecimal
+        // amounts would be rounded), and offsets/zones must not be rewritten to UTC.
+        this.objectMapper.configure(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS, true);
+        this.objectMapper.configure(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE, false);
         this.isReceiver = receiver;
     }
 
@@ -159,8 +168,12 @@ public class RedisManager {
     public static void reset() {
         synchronized (LOCK) {
             if (instance != null) {
-                instance.shutdown();
-                instance = null;
+                try {
+                    instance.shutdown();
+                } finally {
+                    // Cleared even if shutdown failed, so that a later initialize() is not refused.
+                    instance = null;
+                }
             }
         }
     }
@@ -355,7 +368,7 @@ public class RedisManager {
 
                 if (rawData.containsKey(fieldName)) {
                     Object value = rawData.get(fieldName);
-                    value = convertValue(value, field.getType());
+                    value = convertValue(value, field);
                     field.set(entity, value);
                 } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
@@ -407,12 +420,17 @@ public class RedisManager {
         return null;
     }
 
-    private Object convertValue(Object value, Class<?> targetType) {
+    private Object convertValue(Object value, Field field) {
         if (value == null) {
             return null;
         }
 
-        if (targetType.isAssignableFrom(value.getClass())) {
+        Class<?> targetType = field.getType();
+        // Collections and maps are always rebuilt with their declared element types: read back
+        // as plain JSON, the elements of a List<Long> are Integers and those of a List<Double>
+        // BigDecimals (see USE_BIG_DECIMAL_FOR_FLOATS).
+        boolean container = value instanceof Collection<?> || value instanceof Map<?, ?>;
+        if (!container && targetType.isAssignableFrom(value.getClass())) {
             return value;
         }
 
@@ -438,7 +456,14 @@ public class RedisManager {
             return UUID.fromString((String) value);
         }
 
-        return value;
+        if (targetType.isPrimitive() && MethodType.methodType(targetType).wrap().returnType().isInstance(value)) {
+            return value;
+        }
+
+        // Everything JSON has no native type for (enums, java.time, BigDecimal, float, short,
+        // arrays, embeddables, typed collections...) comes back from Redis as a String, Number,
+        // List or Map, which Field.set would reject or the caller could not use.
+        return objectMapper.convertValue(value, objectMapper.getTypeFactory().constructType(field.getGenericType()));
     }
 
     private Field getIdField(Class<?> clazz) {

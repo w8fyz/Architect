@@ -18,9 +18,11 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -34,18 +36,18 @@ import java.util.logging.Logger;
  * {@code hbm2ddl=update}.</p>
  *
  * <h2>What this is not</h2>
- * <p>There is no diffing. {@link MigrationManager#createMigration(String)} emits a
+ * <p>No diffing happens here. {@link MigrationManager#createMigration(String)} emits a
  * full {@code CREATE TABLE} snapshot of the current entity model, which is only
  * applicable to an empty database — useful as a baseline, not as an incremental
- * step. Every migration after the baseline is hand-written SQL. Nothing here
- * computes the delta between two versions of an entity model.</p>
+ * step. Incremental migrations are computed by {@link SchemaDiff} (the CLI's
+ * {@code diff} command) or written by hand.</p>
  *
  * <h2>Atomicity</h2>
  * <p>Each migration's statements and its history row are written in one
  * transaction, so a failure cannot leave a script half-applied but recorded, nor
  * applied but unrecorded. That guarantee is only as strong as the database's
- * transactional DDL: it holds on PostgreSQL and H2, and does not on MySQL or
- * MariaDB, where DDL commits implicitly.</p>
+ * transactional DDL: it holds on PostgreSQL, and does not on MySQL, MariaDB or
+ * H2, where DDL commits implicitly.</p>
  */
 public class MigrationRunner {
 
@@ -199,12 +201,29 @@ public class MigrationRunner {
     public List<Problem> verify() {
         List<Problem> problems = new ArrayList<>();
         Map<String, Available> onDisk = new LinkedHashMap<>();
+        // History is keyed by version: of two files sharing one (V7__a / V7__b, or V1 / V01),
+        // whichever is applied first hides the other for good, or both run on a fresh database.
+        // Groups already fully applied (both rows recorded) are history, not a hazard: renaming
+        // either file now would only trade this report for a missing-file one.
+        List<Applied> history = applied();
+        Set<String> appliedVersions = new HashSet<>();
+        for (Applied applied : history) {
+            appliedVersions.add(applied.version());
+        }
+        Map<List<Long>, Available> byNumericVersion = new LinkedHashMap<>();
         for (Available a : available()) {
             onDisk.put(a.version().raw(), a);
+            Available first = byNumericVersion.putIfAbsent(numericKey(a.version()), a);
+            if (first != null && !(appliedVersions.contains(first.version().raw())
+                    && appliedVersions.contains(a.version().raw()))) {
+                problems.add(new Problem(a.version().raw(),
+                        "duplicate version: " + first.filename() + " and " + a.filename()
+                                + " have the same version; renumber one of them"));
+            }
         }
 
         MigrationVersion highestApplied = null;
-        for (Applied applied : applied()) {
+        for (Applied applied : history) {
             Available disk = onDisk.get(applied.version());
             if (disk == null) {
                 problems.add(new Problem(applied.version(),
@@ -259,7 +278,8 @@ public class MigrationRunner {
      * Stops at the first failure; migrations already applied in this run stay
      * applied, since each is its own transaction.
      *
-     * @param dryRun when true, reports what would run and touches nothing
+     * @param dryRun when true, reports what would run without applying it (the history
+     *               table is still created if absent)
      * @return the migrations applied (or that would be, when {@code dryRun})
      */
     public List<Available> apply(boolean dryRun) {
@@ -373,6 +393,15 @@ public class MigrationRunner {
             out.put(a.version(), a);
         }
         return out;
+    }
+
+    /** Version segments without trailing zeros, so that V1, V01 and V1.0 compare equal. */
+    private static List<Long> numericKey(MigrationVersion version) {
+        List<Long> segments = new ArrayList<>(version.segments());
+        while (segments.size() > 1 && segments.get(segments.size() - 1) == 0L) {
+            segments.remove(segments.size() - 1);
+        }
+        return segments;
     }
 
     // ── Plumbing ─────────────────────────────────────────────────────────────

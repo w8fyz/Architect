@@ -48,6 +48,8 @@ dependencies {
     implementation 'redis.clients:jedis:8.0.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.3'
+    // java.time fields (LocalDateTime, Instant...) cannot be cached in Redis without it.
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.3'
     implementation 'io.github.classgraph:classgraph:4.8.196'
 
     examplesRuntimeOnly 'org.postgresql:postgresql:42.7.13'

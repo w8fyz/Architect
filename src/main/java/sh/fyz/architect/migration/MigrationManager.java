@@ -256,6 +256,11 @@ public class MigrationManager {
      * single transaction. Holds no instance state.</p>
      */
     static List<String> parseSqlStatements(String sql) {
+        // A UTF-8 byte order mark (Windows editors) survives trim() and would be sent to the
+        // database as part of the first statement.
+        if (sql.startsWith("\uFEFF")) {
+            sql = sql.substring(1);
+        }
         List<String> statements = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean inSingleQuote = false;
@@ -290,6 +295,8 @@ public class MigrationManager {
                 if (c == '*' && next == '/') {
                     inBlockComment = false;
                     i++;
+                    // The comment separated two tokens: DROP TABLE/*x*/foo must not become DROP TABLEfoo.
+                    current.append(' ');
                 }
                 continue;
             }
@@ -310,7 +317,9 @@ public class MigrationManager {
                 inSingleQuote = !inSingleQuote;
             } else if (c == '"' && !inSingleQuote) {
                 inDoubleQuote = !inDoubleQuote;
-            } else if (c == '$' && !inSingleQuote && !inDoubleQuote) {
+            } else if (c == '$' && !inSingleQuote && !inDoubleQuote
+                    && (i == 0 || !isIdentifierChar(sql.charAt(i - 1)))) {
+                // Inside an identifier (price$usd$) a '$' is part of the name, not a quote.
                 String tag = tryReadDollarTag(sql, i);
                 if (tag != null) {
                     current.append(tag);
@@ -352,11 +361,17 @@ public class MigrationManager {
             if (c == '$') {
                 return sql.substring(start, i + 1);
             }
-            if (!(Character.isLetterOrDigit(c) || c == '_')) {
+            // PostgreSQL tags follow identifier rules: they cannot start with a digit ($1 is a
+            // positional parameter).
+            if (!(Character.isLetter(c) || c == '_' || (i > start + 1 && Character.isDigit(c)))) {
                 return null;
             }
             i++;
         }
         return null;
+    }
+
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 }

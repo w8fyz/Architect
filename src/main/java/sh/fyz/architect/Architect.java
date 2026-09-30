@@ -118,14 +118,20 @@ public class Architect {
             return;
         }
 
-        if (redisCredentials != null && RedisManager.isInitialized()) {
-            RedisManager.reset();
+        // Redis first: its shutdown flushes the pending cached writes, which needs the database.
+        // Each step runs even if an earlier one throws, so nothing stays half-initialized.
+        try {
+            if (redisCredentials != null && RedisManager.isInitialized()) {
+                RedisManager.reset();
+            }
+        } finally {
+            try {
+                if (SessionManager.isInitialized()) {
+                    SessionManager.reset();
+                }
+            } finally {
+                RepositoryRegistry.get().clear();
+            }
         }
-
-        if (SessionManager.isInitialized()) {
-            SessionManager.reset();
-        }
-
-        RepositoryRegistry.get().clear();
     }
 }

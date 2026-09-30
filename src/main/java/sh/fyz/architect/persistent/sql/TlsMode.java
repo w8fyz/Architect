@@ -8,7 +8,10 @@ package sh.fyz.architect.persistent.sql;
  * the closest equivalent.</p>
  */
 public enum TlsMode {
-    /** No TLS. Default for backwards compatibility. */
+    /**
+     * No TLS requested. Default for backwards compatibility. PostgreSQL gets no {@code sslmode}
+     * parameter, so the driver's own default ({@code prefer}) applies.
+     */
     DISABLE,
     /** Try TLS, fall back to plain text. */
     PREFER,

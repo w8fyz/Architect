@@ -76,9 +76,9 @@ public class ShadowDatabase {
     }
 
     /**
-     * The guard. Compares normalised JDBC URLs — query parameters stripped, case folded, default
-     * ports made explicit — so that a TLS flag, a trailing parameter or an omitted {@code :5432}
-     * cannot disguise the production database as a shadow.
+     * The guard. Compares normalised JDBC URLs — query parameters and H2 {@code ;} settings
+     * stripped, case folded, default ports made explicit — so that a TLS flag, a trailing
+     * parameter or an omitted {@code :5432} cannot disguise the production database as a shadow.
      */
     public void assertNotMainDatabase(String mainUrl) {
         if (mainUrl == null) {
@@ -95,7 +95,12 @@ public class ShadowDatabase {
 
     private static String normalise(String jdbcUrl) {
         String url = jdbcUrl.trim().toLowerCase(Locale.ROOT);
+        // Parameters start at '?' (PostgreSQL, MySQL, MariaDB) or at ';' (H2).
         int query = url.indexOf('?');
+        int settings = url.indexOf(';');
+        if (settings >= 0 && (query < 0 || settings < query)) {
+            query = settings;
+        }
         if (query >= 0) {
             url = url.substring(0, query);
         }

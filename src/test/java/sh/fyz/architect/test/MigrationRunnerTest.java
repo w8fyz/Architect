@@ -415,6 +415,35 @@ public class MigrationRunnerTest {
     }
 
     @Test
+    @Order(52)
+    @DisplayName("deux fichiers de meme version sont signales par verify")
+    void testDuplicateVersionsAreReported() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup");
+        try {
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().anyMatch(p -> p.detail().contains("duplicate version")),
+                    "V1 and V01 share a version: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(53)
+    @DisplayName("decoupage SQL : commentaire bloc entre deux mots, BOM en tete")
+    void testSqlSplitterEdgeCases() {
+        assertDoesNotThrow(() -> runner.manager().executeSql(
+                "\uFEFFCREATE TABLE/*c*/runner_split (id INT); DROP TABLE runner_split;"));
+    }
+
+    @Test
     @Order(51)
     @DisplayName("le nom de table d'historique est contraint au prefixe de l'outil")
     void testHistoryTableNameIsValidated() {

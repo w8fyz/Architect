@@ -1,7 +1,5 @@
 package sh.fyz.architect.persistent.sql;
 
-import java.util.regex.Pattern;
-
 public abstract class SQLAuthProvider {
 
     public abstract String getDialect();
