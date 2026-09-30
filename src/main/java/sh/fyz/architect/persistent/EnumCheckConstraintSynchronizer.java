@@ -75,7 +75,9 @@ public class EnumCheckConstraintSynchronizer {
 
     @SuppressWarnings("unchecked")
     private static void collectFieldMappings(List<EnumColumnMapping> mappings, Field field, String entityTableName) {
-        if (field.isAnnotationPresent(Transient.class) || Modifier.isTransient(field.getModifiers())) {
+        // Static fields (constants such as a default enum value) are not columns.
+        if (field.isAnnotationPresent(Transient.class) || Modifier.isTransient(field.getModifiers())
+                || Modifier.isStatic(field.getModifiers())) {
             return;
         }
 

@@ -120,6 +120,9 @@ public class ShadowDatabase {
             defaultPort = 5432;
         } else if (url.startsWith("jdbc:mysql:") || url.startsWith("jdbc:mariadb:")) {
             defaultPort = 3306;
+        } else if (url.startsWith("jdbc:h2:tcp:") || url.startsWith("jdbc:h2:ssl:")) {
+            // H2Auth always spells the port out, a hand-written shadow URL may not.
+            defaultPort = 9092;
         } else {
             return url;
         }
@@ -179,6 +182,11 @@ public class ShadowDatabase {
                         stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
                     } else if (dialect.contains("h2")) {
                         stmt.execute("DROP ALL OBJECTS");
+                    } else if (dialect.contains("sqlite")) {
+                        // SQLite's DROP TABLE has no CASCADE.
+                        for (String table : tableNames(connection)) {
+                            stmt.execute("DROP TABLE IF EXISTS \"" + table + "\"");
+                        }
                     } else {
                         for (String table : tableNames(connection)) {
                             stmt.execute("DROP TABLE IF EXISTS \"" + table + "\" CASCADE");

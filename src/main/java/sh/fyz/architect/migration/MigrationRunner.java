@@ -333,19 +333,54 @@ public class MigrationRunner {
                             + "Baselining is only for a database that has never been migrated.");
         }
         String name = "V" + version + "__baseline";
-        Path file = manager.createMigration(name);
-        String filename = file.getFileName().toString();
-
-        MigrationVersion parsed = MigrationVersion.parse(filename);
-        if (parsed == null) {
-            throw new IllegalStateException("Generated baseline filename is not parseable: " + filename);
+        // Checked before anything is written: a committed migration file must never be rewritten,
+        // since its recorded checksum would then fail verify() on every database that ran it.
+        MigrationVersion target = MigrationVersion.parse(name + ".sql");
+        if (target == null) {
+            throw new IllegalArgumentException("Invalid baseline version: " + version);
         }
-        Available baseline = new Available(parsed, filename, checksum(read(filename)));
+        Available existing = null;
+        for (Available file : available()) {
+            if (!sameNumericVersion(file.version(), target)) {
+                continue;
+            }
+            // Matched by version and description, not by filename: createMigration writes
+            // "1.5" as V1_5__baseline.sql.
+            if (!target.description().equals(file.version().description())) {
+                throw new IllegalStateException("Cannot baseline as version " + version + ": "
+                        + file.filename() + " already uses it.");
+            }
+            existing = file;
+        }
+        // Another database adopted at the same point: the snapshot already exists, record it as is.
+        Available baseline = existing;
+        if (baseline == null) {
+            String filename = manager.createMigration(name).getFileName().toString();
+            MigrationVersion parsed = MigrationVersion.parse(filename);
+            if (parsed == null) {
+                throw new IllegalStateException("Generated baseline filename is not parseable: " + filename);
+            }
+            baseline = new Available(parsed, filename, checksum(read(filename)));
+        }
+        Available recorded = baseline;
 
         long now = System.currentTimeMillis();
-        withTransaction(connection -> record(connection, baseline, now));
-        LOG.info("Baseline recorded (not executed): " + filename);
-        return baseline;
+        withTransaction(connection -> record(connection, recorded, now));
+        LOG.info("Baseline recorded (not executed): " + recorded.filename());
+        return recorded;
+    }
+
+    /** V1 and V1.0 or V01: the same version spelled differently. */
+    private static boolean sameNumericVersion(MigrationVersion a, MigrationVersion b) {
+        int size = Math.max(a.segments().size(), b.segments().size());
+        for (int i = 0; i < size; i++) {
+            long x = i < a.segments().size() ? a.segments().get(i) : 0L;
+            long y = i < b.segments().size() ? b.segments().get(i) : 0L;
+            if (x != y) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ── History table ────────────────────────────────────────────────────────

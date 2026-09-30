@@ -3,10 +3,12 @@ package sh.fyz.architect.cache;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.hibernate.Session;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
 import redis.clients.jedis.exceptions.JedisException;
 import sh.fyz.architect.entities.DatabaseAction;
+import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistent.SessionManager;
 import sh.fyz.architect.repositories.GenericRepository;
 
@@ -27,7 +29,21 @@ public class EntityChannelPubSub<T> {
 
     public EntityChannelPubSub(Class<T> entityClass) {
         this.entityClass = entityClass;
-        this.hotRepository = new GenericRepository<>(entityClass);
+        this.hotRepository = new GenericRepository<>(entityClass) {
+            /**
+             * A relayed entity was read from the sender's Redis copy, which keeps the version it
+             * was cached with while the row's is incremented by each relayed save: without this,
+             * each save after the first (and any delete) of a {@code @Version} entity would fail
+             * and be dropped.
+             * Last writer wins, like the cached repositories' own flushes.
+             */
+            @Override
+            protected void beforeMerge(Session session, T entity) {
+                if (entity instanceof IdentifiableEntity identifiable) {
+                    alignVersion(session, entity, identifiable.getId());
+                }
+            }
+        };
         this.channelName = "database-action:" + entityClass.getSimpleName();
     }
 

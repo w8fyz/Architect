@@ -1,6 +1,7 @@
 package sh.fyz.architect.repositories;
 
 import jakarta.persistence.Id;
+import jakarta.persistence.Version;
 import sh.fyz.architect.persistent.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -14,6 +15,7 @@ import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 public class GenericRepository<T> {
@@ -25,6 +27,11 @@ public class GenericRepository<T> {
     private static final String PARAM_PREFIX = "__architect_p";
     // Optional because ConcurrentHashMap cannot hold null, and "no id field" must be cached too.
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+    // Optional because ConcurrentHashMap cannot hold null, and "no @Version field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> VERSION_FIELD_CACHE = new ConcurrentHashMap<>();
+    // For async calls on an instance without a database (a relay-only non-receiver), which has no
+    // SessionManager thread pool. Virtual threads need no shutdown.
+    private static final ExecutorService FALLBACK_THREAD_POOL = Executors.newVirtualThreadPerTaskExecutor();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
@@ -38,9 +45,11 @@ public class GenericRepository<T> {
      * Resolves the current session thread pool on each call. This avoids keeping a
      * stale reference after {@code architect.stop()} / {@code start()}, which used to
      * throw {@link java.util.concurrent.RejectedExecutionException} on async operations.
+     * Without a database there is no session thread pool, and a shared virtual-thread
+     * executor is used instead.
      */
     protected ExecutorService threadPool() {
-        return SessionManager.get().getThreadPool();
+        return SessionManager.isInitialized() ? SessionManager.get().getThreadPool() : FALLBACK_THREAD_POOL;
     }
 
     // --- QUERY BUILDER ENTRY POINT ---
@@ -128,6 +137,7 @@ public class GenericRepository<T> {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
+                beforeMerge(session, entity);
                 @SuppressWarnings("unchecked")
                 T savedEntity = (T) session.merge(entity);
                 transaction.commit();
@@ -154,7 +164,11 @@ public class GenericRepository<T> {
 
     public T findById(Object id) {
         try (Session session = openReadOnlySession()) {
-            return session.find(type, id);
+            T entity = session.find(type, id);
+            if (entity != null) {
+                prepareDetached(session, entity);
+            }
+            return entity;
         }
     }
 
@@ -171,7 +185,9 @@ public class GenericRepository<T> {
 
     public List<T> all() {
         try (Session session = openReadOnlySession()) {
-            return session.createQuery("from " + type.getName(), type).list();
+            List<T> entities = session.createQuery("from " + type.getName(), type).list();
+            entities.forEach(entity -> prepareDetached(session, entity));
+            return entities;
         }
     }
 
@@ -190,6 +206,7 @@ public class GenericRepository<T> {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
+                beforeMerge(session, entity);
                 Object managed = session.merge(entity);
                 session.remove(managed);
                 transaction.commit();
@@ -225,18 +242,19 @@ public class GenericRepository<T> {
      * for concurrent callers).
      */
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
-        return select(builder, explicitLimit, builder.getOffset());
+        return select(builder, explicitLimit, builder.getOffset(), true);
     }
 
     /**
      * Every row matching the builder's conditions, limit and offset ignored — the rows its
-     * {@link QueryBuilder#delete()} removes.
+     * {@link QueryBuilder#delete()} removes. Only their ids are used, so they skip
+     * {@link #prepareDetached}.
      */
     protected List<T> findAllMatching(QueryBuilder<T> builder) {
-        return select(builder, -1, 0);
+        return select(builder, -1, 0, false);
     }
 
-    private List<T> select(QueryBuilder<T> builder, int limit, int offset) {
+    private List<T> select(QueryBuilder<T> builder, int limit, int offset, boolean prepare) {
         validateQueryFields(builder);
 
         try (Session session = openReadOnlySession()) {
@@ -251,7 +269,11 @@ public class GenericRepository<T> {
                 query.setFirstResult(offset);
             }
 
-            return query.list();
+            List<T> entities = query.list();
+            if (prepare) {
+                entities.forEach(entity -> prepareDetached(session, entity));
+            }
+            return entities;
         }
     }
 
@@ -290,6 +312,50 @@ public class GenericRepository<T> {
                 throw new RuntimeException("Failed to execute delete query: " + e.getMessage(), e);
             }
         }
+    }
+
+    /** Called by {@link #save} and {@link #delete} inside their transaction, just before the entity is merged. */
+    protected void beforeMerge(Session session, T entity) {
+    }
+
+    /**
+     * Gives a {@code @Version} entity the version its row currently has, so that merging it
+     * overwrites the row (last writer wins) instead of failing the version check. For copies
+     * that keep the version they were read with while the row's moves on, like the ones served
+     * from Redis. A deleted row is left alone, so its merge still fails.
+     */
+    protected void alignVersion(Session session, T entity, Object id) {
+        Field versionField = VERSION_FIELD_CACHE.computeIfAbsent(entity.getClass(), c -> {
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field f : current.getDeclaredFields()) {
+                    if (f.isAnnotationPresent(Version.class)) {
+                        f.setAccessible(true);
+                        return Optional.of(f);
+                    }
+                }
+            }
+            return Optional.empty();
+        }).orElse(null);
+        if (versionField == null || id == null) {
+            return;
+        }
+        T current = session.find(type, id);
+        if (current == null) {
+            return;
+        }
+        try {
+            versionField.set(entity, versionField.get(current));
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot access @Version field of " + type.getSimpleName(), e);
+        }
+    }
+
+    /**
+     * Called for each entity a read returns, while its session is still open. Subclasses that
+     * need more of the entity graph than the mapping fetches eagerly load it here: once the
+     * session closes, touching an uninitialized lazy association throws.
+     */
+    protected void prepareDetached(Session session, T entity) {
     }
 
     /**

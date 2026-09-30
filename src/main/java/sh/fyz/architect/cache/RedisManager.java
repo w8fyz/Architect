@@ -10,10 +10,13 @@ import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
+import org.hibernate.Session;
+import org.hibernate.proxy.HibernateProxy;
 import redis.clients.jedis.*;
 import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.params.SetParams;
 import redis.clients.jedis.resps.ScanResult;
+import sh.fyz.architect.persistent.SessionManager;
 
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
@@ -43,6 +46,16 @@ public class RedisManager {
     private static final ConcurrentHashMap<Class<?>, Map<String, Field>> FIELD_CACHE = new ConcurrentHashMap<>();
     // Optional because ConcurrentHashMap cannot hold null, and "no @Id field" must be cached too.
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * A related entity could not be read from the database. Not a corrupt cache entry: findAll
+     * must not skip the entity (and return a partial result as if complete), it rethrows.
+     */
+    private static final class RelatedLoadException extends RuntimeException {
+        RelatedLoadException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
 
     /** Channel name → its subscriber, so each channel is subscribed once per instance and unsubscribed on shutdown. */
     private final Map<String, EntityChannelPubSub<?>> subscriptions = new ConcurrentHashMap<>();
@@ -214,15 +227,17 @@ public class RedisManager {
     }
 
     public <T> T find(String key, Class<T> type) {
-        return find(key, type, new HashMap<>());
+        return find(key, type, new HashMap<>(), new HashMap<>());
     }
 
     /**
+     * @param loaded     related entities read from the database (see {@link #findRelated}), by
+     *                   full key, shared by every entity rebuilt in one call
      * @param inProgress entities of the graph being rebuilt, by full key. A relation pointing back
      *                   to one of them (Owner → Pet → Owner) reuses that instance instead of
      *                   rebuilding it forever.
      */
-    private <T> T find(String key, Class<T> type, Map<String, Object> inProgress) {
+    private <T> T find(String key, Class<T> type, Map<String, Object> inProgress, Map<String, Object> loaded) {
         String fullKey = keyPrefix + key;
         Object existing = inProgress.get(fullKey);
         if (type.isInstance(existing)) {
@@ -239,7 +254,9 @@ public class RedisManager {
                 return null;
             }
             Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
-            return reconstructEntity(rawData, type, fullKey, inProgress);
+            return reconstructEntity(rawData, type, fullKey, inProgress, loaded);
+        } catch (RelatedLoadException e) {
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to find entity in Redis: " + e.getMessage(), e);
         }
@@ -277,11 +294,16 @@ public class RedisManager {
         }
 
         List<T> result = new ArrayList<>(entries.size());
+        // Many cached entities typically point to the same uncached one (every Pet to its Owner):
+        // read each from the database once per call, not once per entity.
+        Map<String, Object> loaded = new HashMap<>();
         for (Map.Entry<String, String> entry : entries.entrySet()) {
             try {
                 Map<String, Object> rawData = objectMapper.readValue(entry.getValue(), MAP_TYPE_REF);
-                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>());
+                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>(), loaded);
                 if (entity != null) result.add(entity);
+            } catch (RelatedLoadException e) {
+                throw e;
             } catch (Exception e) {
                 LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
             }
@@ -328,19 +350,15 @@ public class RedisManager {
 
             if (value != null) {
                 if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
-                    Field idField = getIdField(value.getClass());
-                    if (idField != null) {
-                        jsonMap.put(field.getName() + "_id", idField.get(value));
+                    if (value instanceof HibernateProxy || getIdField(value.getClass()) != null) {
+                        jsonMap.put(field.getName() + "_id", idOf(value));
                     }
                 } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     if (value instanceof Collection) {
                         List<Object> ids = new ArrayList<>();
                         for (Object item : (Collection<?>) value) {
-                            if (item != null) {
-                                Field idField = getIdField(item.getClass());
-                                if (idField != null) {
-                                    ids.add(idField.get(item));
-                                }
+                            if (item instanceof HibernateProxy || (item != null && getIdField(item.getClass()) != null)) {
+                                ids.add(idOf(item));
                             }
                         }
                         if (!ids.isEmpty()) {
@@ -355,8 +373,73 @@ public class RedisManager {
         return jsonMap;
     }
 
+    /**
+     * The id of a related entity. A lazy association holds an uninitialized Hibernate proxy,
+     * whose own fields are all null: its id is only known to the proxy's initializer.
+     */
+    private Object idOf(Object related) throws IllegalAccessException {
+        if (related instanceof HibernateProxy proxy) {
+            return proxy.getHibernateLazyInitializer().getIdentifier();
+        }
+        return getIdField(related.getClass()).get(related);
+    }
+
+    /**
+     * Related entities, in the order of their ids. Those not in Redis (their type is not cached,
+     * their key expired...) are read from the database instead, in one query per call: leaving
+     * them out would not only return a wrong entity, saving it back would clear the foreign key
+     * or the collection's rows. Ids found nowhere, or not in Redis on an instance without a
+     * database, are left out.
+     */
+    private List<Object> findRelated(Class<?> type, List<?> rawIds, Map<String, Object> inProgress,
+                                     Map<String, Object> loaded) {
+        Object[] found = new Object[rawIds.size()];
+        List<Integer> missing = new ArrayList<>();
+        for (int i = 0; i < rawIds.size(); i++) {
+            String key = type.getSimpleName() + ":" + rawIds.get(i);
+            Object cached = find(key, type, inProgress, loaded);
+            if (cached != null) {
+                found[i] = cached;
+            } else if (loaded.containsKey(key)) {
+                found[i] = loaded.get(key);
+            } else {
+                missing.add(i);
+            }
+        }
+        if (!missing.isEmpty() && SessionManager.isInitialized()) {
+            Field idField = getIdField(type);
+            List<Object> ids = new ArrayList<>(missing.size());
+            for (int i : missing) {
+                Object rawId = rawIds.get(i);
+                ids.add(idField == null ? rawId : objectMapper.convertValue(rawId, idField.getType()));
+            }
+            List<?> rows;
+            try (Session session = SessionManager.get().getSession()) {
+                session.setDefaultReadOnly(true);
+                // Same order as the ids, null for a missing row.
+                rows = session.findMultiple(type, ids);
+            } catch (RuntimeException e) {
+                throw new RelatedLoadException("Failed to load " + type.getSimpleName() + " " + ids
+                        + " from the database: " + e.getMessage(), e);
+            }
+            for (int k = 0; k < missing.size(); k++) {
+                int i = missing.get(k);
+                found[i] = rows.get(k);
+                loaded.put(type.getSimpleName() + ":" + rawIds.get(i), rows.get(k));
+            }
+        }
+        List<Object> result = new ArrayList<>(found.length);
+        for (Object entity : found) {
+            if (entity != null) {
+                result.add(entity);
+            }
+        }
+        return result;
+    }
+
     private <T> T reconstructEntity(Map<String, Object> rawData, Class<T> type,
-                                    String fullKey, Map<String, Object> inProgress) {
+                                    String fullKey, Map<String, Object> inProgress,
+                                    Map<String, Object> loaded) {
         try {
             T entity = type.getDeclaredConstructor().newInstance();
             inProgress.put(fullKey, entity);
@@ -373,8 +456,8 @@ public class RedisManager {
                 } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
                     if (idValue != null) {
-                        Object relatedEntity = find(field.getType().getSimpleName() + ":" + idValue, field.getType(), inProgress);
-                        field.set(entity, relatedEntity);
+                        List<Object> related = findRelated(field.getType(), List.of(idValue), inProgress, loaded);
+                        field.set(entity, related.isEmpty() ? null : related.get(0));
                     }
                 } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     List<?> ids = (List<?>) rawData.get(fieldName + "_ids");
@@ -388,18 +471,15 @@ public class RedisManager {
 
                         Class<?> genericType = getGenericType(field);
                         if (genericType != null) {
-                            for (Object idValue : ids) {
-                                Object relatedEntity = find(genericType.getSimpleName() + ":" + idValue, genericType, inProgress);
-                                if (relatedEntity != null) {
-                                    relatedEntities.add(relatedEntity);
-                                }
-                            }
+                            relatedEntities.addAll(findRelated(genericType, ids, inProgress, loaded));
                             field.set(entity, relatedEntities);
                         }
                     }
                 }
             }
             return entity;
+        } catch (RelatedLoadException e) {
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to reconstruct entity of type " + type.getSimpleName() + ": " + e.getMessage(), e);
         }

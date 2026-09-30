@@ -89,7 +89,7 @@ public class DatabaseInspector {
 
                 List<List<String>> rows = new ArrayList<>();
                 int offset = safePage * safeSize;
-                String sql = "SELECT * FROM \"" + tableName + "\" LIMIT " + safeSize + " OFFSET " + offset;
+                String sql = "SELECT * FROM " + quote(tableName) + " LIMIT " + safeSize + " OFFSET " + offset;
                 try (Statement stmt = connection.createStatement();
                      ResultSet rs = stmt.executeQuery(sql)) {
                     int colCount = rs.getMetaData().getColumnCount();
@@ -138,7 +138,7 @@ public class DatabaseInspector {
 
     private long countRows(Connection connection, String tableName) throws SQLException {
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM \"" + tableName + "\"")) {
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + quote(tableName))) {
             return rs.next() ? rs.getLong(1) : 0;
         }
     }
@@ -152,6 +152,15 @@ public class DatabaseInspector {
             }
         }
         return pks;
+    }
+
+    /** Quoted in the dialect's syntax: without ANSI_QUOTES, MySQL reads "x" as a string. */
+    private String quote(String identifier) {
+        String lower = dialect.toLowerCase();
+        if (lower.contains("mysql") || lower.contains("mariadb")) {
+            return "`" + identifier.replace("`", "``") + "`";
+        }
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private String getSchemaPattern() {

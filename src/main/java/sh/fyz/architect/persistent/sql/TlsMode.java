@@ -9,8 +9,9 @@ package sh.fyz.architect.persistent.sql;
  */
 public enum TlsMode {
     /**
-     * No TLS requested. Default for backwards compatibility. PostgreSQL gets no {@code sslmode}
-     * parameter, so the driver's own default ({@code prefer}) applies.
+     * No TLS requested. Default for backwards compatibility. No TLS parameter is added, so the
+     * driver's own default applies: opportunistic TLS for PostgreSQL ({@code prefer}) and MySQL
+     * ({@code PREFERRED}), plaintext for MariaDB and H2.
      */
     DISABLE,
     /** Try TLS, fall back to plain text. */

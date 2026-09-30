@@ -5,7 +5,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 ## Requirements
 
 - **Java 21+**
-- A SQL database (PostgreSQL, MySQL, MariaDB, H2, SQLite)
+- A SQL database (PostgreSQL, MySQL, MariaDB, H2, SQLite) and its JDBC driver, which Architect does not bundle (e.g. `org.postgresql:postgresql`). SQLite also needs `org.hibernate.orm:hibernate-community-dialects` for its dialect.
 - Redis (optional, for caching and relay)
 
 ## Installation
@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.0'
+    implementation 'sh.fyz:Architect:2.2.5'
 }
 ```
 
@@ -24,7 +24,7 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.0</version>
+    <version>2.2.5</version>
 </dependency>
 ```
 
@@ -100,7 +100,7 @@ architect.setDatabaseCredentials(new DatabaseCredentials(
     new PostgreSQLAuth("localhost", 5432, "mydb"),
     "user", "password",
     10,   // connection pool size
-    10,   // thread pool size
+    10,   // thread pool size (unused: async calls run on virtual threads)
     "update" // hbm2ddl.auto strategy
 ));
 
@@ -140,6 +140,7 @@ new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
 `TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters. Dialect notes:
 
 - **PostgreSQL**: `DISABLE` adds no `sslmode` parameter, so the pgjdbc default (`prefer`) applies.
+- **MySQL**: `DISABLE` adds no TLS parameter either, so the Connector/J default (`PREFERRED`) applies.
 - **MariaDB**: the legacy `useSsl` options are used, which Connector/J 2.x and 3.x both understand (3.x logs a deprecation notice). There is no opportunistic mode, so `PREFER` requires TLS like `REQUIRE`.
 - **H2**: every mode other than `DISABLE` uses `jdbc:h2:ssl://`, which checks the certificate chain against the JVM truststore but not the hostname — `VERIFY_FULL` behaves like `VERIFY_CA`.
 
@@ -153,7 +154,7 @@ new DatabaseCredentials(provider, user, password, poolSize)
 new DatabaseCredentials(provider, user, password, poolSize, threadPoolSize, hbm2ddlAuto)
 ```
 
-`hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"validate"`, `"none"`.
+`hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"create-only"`, `"validate"`, `"none"`.
 
 > **Production**: always use `"none"` and manage schema changes through the migration system below. `"update"` is convenient for development but is not safe to run against a live database.
 
@@ -199,7 +200,9 @@ Redis-first reads. Falls back to database on cache miss, then populates the cach
 GenericCachedRepository<User> users = new GenericCachedRepository<>(User.class);
 ```
 
-Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache. Collection relations of a cached entity must be fetched eagerly (`FetchType.EAGER`): entities are cached after their session is closed, where a lazy collection cannot be read.
+Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache; on an instance with a database, related entities missing from Redis are read from it (one query per relation). Lazy collections are loaded when an entity is read from the database, before it is cached.
+
+A queued write that the database rejects for the entity's own state (value too long, `NOT NULL`, `CHECK`) is dropped with a `SEVERE` log and the cache is refreshed from the database, so that it cannot block the writes queued after it; one refused by a foreign-key or unique constraint is retried for about 5 seconds first. `@Version` entities are last-writer-wins: a queued or relayed write takes the row's current version before it is merged.
 
 ### GenericRelayRepository
 

@@ -120,6 +120,11 @@ public class QueryBuilder<T> {
     // --- TERMINAL OPERATIONS (sync) ---
 
     public List<T> findAll() {
+        // Not passed on: the repositories treat a limit of 0 as "no limit".
+        if (limit == 0) {
+            repository.validateQueryFields(this);
+            return new ArrayList<>();
+        }
         return repository.executeQuery(this);
     }
 

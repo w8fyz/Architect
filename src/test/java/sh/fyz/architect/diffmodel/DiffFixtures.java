@@ -49,6 +49,23 @@ public final class DiffFixtures {
         @Override public Object getId() { return id; }
     }
 
+    /** Mixed-case table and column names: quoted identifiers keep their case. */
+    @Entity
+    @Table(name = "DiffCamel")
+    public static class CamelCaseItem implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        public String displayName;
+        @Override public Object getId() { return id; }
+    }
+
+    /** {@link CamelCaseItem} without {@code displayName}. */
+    @Entity
+    @Table(name = "DiffCamel")
+    public static class CamelCaseItemTrimmed implements IdentifiableEntity {
+        @Id @GeneratedValue(strategy = GenerationType.IDENTITY) public Long id;
+        @Override public Object getId() { return id; }
+    }
+
     @Entity
     @Table(name = "diff_other")
     public static class OtherTable implements IdentifiableEntity {

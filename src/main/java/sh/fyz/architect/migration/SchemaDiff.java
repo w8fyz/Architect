@@ -124,11 +124,12 @@ public class SchemaDiff {
                 (ALTER_COLUMN_TYPE.matcher(statement).find() ? columnTypeAlters : additive).add(statement);
             }
             Map<String, Set<String>> model = modelTables(metadata);
-            Map<String, Map<String, String>> live = liveTables();
+            Map<String, String> liveNames = new HashMap<>();
+            Map<String, Map<String, String>> live = liveTables(liveNames);
 
             List<Removal> removals = new ArrayList<>();
             List<TypeChange> typeChanges = new ArrayList<>();
-            destructivePass(model, live, metadata, removals, typeChanges);
+            destructivePass(model, live, liveNames, metadata, removals, typeChanges);
             migratorTypeChanges(columnTypeAlters, live, metadata, typeChanges);
 
             List<RenameHint> hints = renameHints(removals, additive);
@@ -324,8 +325,12 @@ public class SchemaDiff {
         return out;
     }
 
-    /** Live tables → column name → SQL type name, read straight from JDBC metadata. */
-    private Map<String, Map<String, String>> liveTables() {
+    /**
+     * Live tables → column name → SQL type name, read straight from JDBC metadata. Names are
+     * lowercased for matching against the model; {@code originalNames} receives their real
+     * spelling (see {@link #liveName}).
+     */
+    private Map<String, Map<String, String>> liveTables(Map<String, String> originalNames) {
         Map<String, Map<String, String>> out = new LinkedHashMap<>();
         try (Connection connection = DriverManager.getConnection(target.getUrl(), user, password)) {
             DatabaseMetaData meta = connection.getMetaData();
@@ -339,13 +344,17 @@ public class SchemaDiff {
             }
             for (String table : tables) {
                 Map<String, String> columns = new LinkedHashMap<>();
+                String tableKey = table.toLowerCase(Locale.ROOT);
                 try (ResultSet rs = meta.getColumns(null, schema, table, null)) {
                     while (rs.next()) {
-                        columns.put(rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT),
-                                rs.getString("TYPE_NAME"));
+                        String column = rs.getString("COLUMN_NAME");
+                        String columnKey = column.toLowerCase(Locale.ROOT);
+                        columns.put(columnKey, rs.getString("TYPE_NAME"));
+                        originalNames.put(tableKey + "." + columnKey, column);
                     }
                 }
-                out.put(table.toLowerCase(Locale.ROOT), columns);
+                out.put(tableKey, columns);
+                originalNames.put(tableKey, table);
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to read the reference database schema", e);
@@ -355,6 +364,7 @@ public class SchemaDiff {
 
     private void destructivePass(Map<String, Set<String>> model,
                                  Map<String, Map<String, String>> live,
+                                 Map<String, String> liveNames,
                                  Metadata metadata,
                                  List<Removal> removals,
                                  List<TypeChange> typeChanges) {
@@ -372,23 +382,25 @@ public class SchemaDiff {
             Set<String> modelColumns = model.get(table);
             if (modelColumns == null) {
                 removals.add(new Removal(table, null,
-                        "DROP TABLE IF EXISTS " + quote(table) + " CASCADE"));
+                        "DROP TABLE IF EXISTS " + quote(liveName(liveNames, table, null)) + " CASCADE"));
                 continue;
             }
             for (String column : entry.getValue().keySet()) {
                 if (!modelColumns.contains(column)) {
                     removals.add(new Removal(table, column,
-                            "ALTER TABLE " + quote(table) + " DROP COLUMN " + quote(column)));
+                            "ALTER TABLE " + quote(liveName(liveNames, table, null))
+                                    + " DROP COLUMN " + quote(liveName(liveNames, table, column))));
                 }
             }
         }
         // Type changes are compared on the model side, where the dialect's own type name is
         // available; going the other way would mean mapping JDBC type names back to the model.
-        detectTypeChanges(metadata, live, typeChanges);
+        detectTypeChanges(metadata, live, liveNames, typeChanges);
     }
 
     private void detectTypeChanges(Metadata metadata,
                                    Map<String, Map<String, String>> live,
+                                   Map<String, String> liveNames,
                                    List<TypeChange> typeChanges) {
         for (Namespace namespace : metadata.getDatabase().getNamespaces()) {
             for (Table table : namespace.getTables()) {
@@ -416,7 +428,8 @@ public class SchemaDiff {
                         continue;
                     }
                     typeChanges.add(new TypeChange(tableName, columnName, liveType, modelType,
-                            "ALTER TABLE " + quote(tableName) + " ALTER COLUMN " + quote(columnName)
+                            "ALTER TABLE " + quote(liveName(liveNames, tableName, null))
+                                    + " ALTER COLUMN " + quote(liveName(liveNames, tableName, columnName))
                                     + " TYPE " + modelType));
                 }
             }
@@ -568,8 +581,23 @@ public class SchemaDiff {
         return settings;
     }
 
-    private static String quote(String identifier) {
-        return "\"" + identifier + "\"";
+    /**
+     * The real spelling of a live table ({@code column} null) or column. Identifiers are quoted
+     * (GLOBALLY_QUOTED_IDENTIFIERS), so their case is kept: a statement naming
+     * {@code "useraccount"} fails against a table created as {@code "UserAccount"}.
+     */
+    private static String liveName(Map<String, String> liveNames, String table, String column) {
+        String key = column == null ? table : table + "." + column;
+        return liveNames.getOrDefault(key, column == null ? table : column);
+    }
+
+    /** Quoted in the target's syntax: without ANSI_QUOTES, MySQL reads "x" as a string. */
+    private String quote(String identifier) {
+        String dialect = target.getDialect().toLowerCase(Locale.ROOT);
+        if (dialect.contains("mysql") || dialect.contains("mariadb")) {
+            return "`" + identifier.replace("`", "``") + "`";
+        }
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private static String terminate(String statement) {

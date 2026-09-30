@@ -148,13 +148,24 @@ public class MigrationManager {
                     stmt.execute("CREATE SCHEMA public");
                 } else if (dialectLower.contains("mysql") || dialectLower.contains("mariadb")) {
                     stmt.execute("SET FOREIGN_KEY_CHECKS = 0");
-                    List<String> tables = getTableNamesViaJdbc(connection);
-                    for (String table : tables) {
-                        stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
+                    try {
+                        List<String> tables = getTableNamesViaJdbc(connection);
+                        for (String table : tables) {
+                            stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
+                        }
+                    } finally {
+                        // A session variable: the pool does not reset it, and the next borrower
+                        // of this connection would run without foreign-key enforcement.
+                        stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
                     }
-                    stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
                 } else if (dialectLower.contains("h2")) {
                     stmt.execute("DROP ALL OBJECTS");
+                } else if (dialectLower.contains("sqlite")) {
+                    // SQLite's DROP TABLE has no CASCADE.
+                    List<String> tables = getTableNamesViaJdbc(connection);
+                    for (String table : tables) {
+                        stmt.execute("DROP TABLE IF EXISTS \"" + table + "\"");
+                    }
                 } else {
                     List<String> tables = getTableNamesViaJdbc(connection);
                     for (String table : tables) {

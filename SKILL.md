@@ -23,7 +23,7 @@ src/main/java/sh/fyz/architect/
 │   ├── SessionManager.java                 # Hibernate singleton
 │   ├── EnumCheckConstraintSynchronizer.java # Syncs enum CHECK constraints on PostgreSQL
 │   └── sql/
-│       ├── SQLAuthProvider.java            # Abstract JDBC provider (validates host/database)
+│       ├── SQLAuthProvider.java            # Abstract JDBC provider (host/database only checked non-blank)
 │       ├── TlsMode.java                    # DISABLE / PREFER / REQUIRE / VERIFY_CA / VERIFY_FULL
 │       └── provider/                       # H2, MariaDB, MySQL, PostgreSQL, SQLite
 ├── migration/
@@ -242,6 +242,7 @@ The confirmation token is required (raises `IllegalArgumentException` otherwise)
 - PostgreSQL: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
 - MySQL/MariaDB: disables FK checks, drops each table, re-enables FK checks
 - H2: `DROP ALL OBJECTS`
+- SQLite: drops each table (SQLite has no `CASCADE`)
 
 #### Inspect the database
 
@@ -286,7 +287,7 @@ Migration filenames are validated and resolved against the migration directory; 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.0'
+    implementation 'sh.fyz:Architect:2.2.5'
 }
 ```
 
@@ -296,6 +297,6 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.0</version>
+    <version>2.2.5</version>
 </dependency>
 ```

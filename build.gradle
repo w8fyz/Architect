@@ -45,9 +45,10 @@ dependencies {
     // hibernate.hikari.* setting and silently falls back to its built-in, non-production pool.
     implementation "org.hibernate.orm:hibernate-hikaricp:7.4.11.Final"
     implementation "com.zaxxer:HikariCP:7.1.0"
-    implementation 'redis.clients:jedis:8.0.1'
+    // api: RedisManager's public getJedisPool() and getObjectMapper() return their types.
+    api 'redis.clients:jedis:8.0.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.3'
+    api 'com.fasterxml.jackson.core:jackson-databind:2.22.3'
     // java.time fields (LocalDateTime, Instant...) cannot be cached in Redis without it.
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.3'
     implementation 'io.github.classgraph:classgraph:4.8.196'

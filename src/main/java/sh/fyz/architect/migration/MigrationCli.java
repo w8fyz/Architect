@@ -300,7 +300,7 @@ public final class MigrationCli {
     private static int baseline(MigrationRunner runner, List<String> rest, PrintStream out) {
         String version = rest.isEmpty() ? "1" : rest.get(0);
         MigrationRunner.Available baseline = runner.baseline(version);
-        out.println("Baseline written and recorded as applied: " + baseline.filename());
+        out.println("Baseline recorded as applied: " + baseline.filename());
         out.println("The snapshot was NOT executed — it describes the schema as it already stands.");
         return EXIT_OK;
     }

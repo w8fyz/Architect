@@ -152,6 +152,10 @@ migrations into it — there are none yet. Establish a starting point once:
 migrate baseline        # writes V1__baseline.sql and records it as applied
 ```
 
+If `V1__baseline.sql` is already committed (another database was adopted at the same
+point), it is recorded as is and never rewritten; `baseline` refuses a version that
+another migration file already uses.
+
 The snapshot is **not executed** — it documents the schema as it already stands. From
 then on, every change goes through the normal `diff` → `apply` loop, and a fresh
 environment (a new developer's machine, a test database) can be built from V1 upward.
@@ -201,7 +205,8 @@ migrate diff ci_check --shadow-url $SCRATCH_URL --dry-run | grep -q "No differen
   reported by `verify` and block `apply`, unless both are already applied: otherwise only
   one of them could ever be recorded.
 - The history table (`architect_schema_history`) is created automatically and never
-  dropped by the tooling.
+  dropped by the CLI. `MigrationManager.clearDatabase` (the GUI's Clear tab) drops every
+  table, the history table included.
 
 ## Known limitations
 

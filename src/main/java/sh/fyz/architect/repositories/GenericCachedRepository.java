@@ -4,19 +4,23 @@ import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.cache.RedisManager;
 
+import jakarta.persistence.ElementCollection;
+import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
-import jakarta.persistence.Version;
 
+import org.hibernate.Hibernate;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -26,13 +30,18 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     private static final Logger LOG = Logger.getLogger(GenericCachedRepository.class.getName());
     private static final ConcurrentHashMap<String, Pattern> LIKE_PATTERN_CACHE = new ConcurrentHashMap<>();
+    // LIKE patterns often embed user input ("%" + keyword + "%"): without a bound, every distinct
+    // search would stay in memory for good.
+    private static final int LIKE_PATTERN_CACHE_MAX = 1024;
     // Reflection lookups are cached: in-memory filtering and relation resolution run once per
     // cached entity on every query, and getDeclaredField(s) copies Field objects on each call.
     private static final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>> FIELD_LOOKUP_CACHE =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, List<RelationField>> RELATION_FIELDS_CACHE = new ConcurrentHashMap<>();
-    // Optional because ConcurrentHashMap cannot hold null, and "no @Version field" must be cached too.
-    private static final ConcurrentHashMap<Class<?>, Optional<Field>> VERSION_FIELD_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Class<?>, List<Field>> COLLECTION_FIELDS_CACHE = new ConcurrentHashMap<>();
+    // How many flushes (200 ms apart) retry a write refused by a foreign-key or unique constraint
+    // before dropping it: another queued write may be what it is waiting for.
+    private static final int MAX_CONSTRAINT_RETRIES = 25;
 
     /** A relation-annotated field, with what resolving it needs precomputed. */
     private record RelationField(Field field, boolean oneToMany, Class<?> elementType, String repositoryName) {}
@@ -40,6 +49,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private final Class<T> type;
     private final ConcurrentLinkedQueue<DatabaseAction<T>> updateQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedDeque<DatabaseAction<T>> retryQueue = new ConcurrentLinkedDeque<>();
+    // A lock rather than synchronized: flushes do JDBC work, and a virtual thread (async calls)
+    // blocked in or on a monitor pins its carrier thread before JDK 24.
+    private final ReentrantLock flushLock = new ReentrantLock();
+    /** Constraint rejections per queued action, guarded by {@link #flushLock}. */
+    private final IdentityHashMap<DatabaseAction<T>, Integer> constraintRejections = new IdentityHashMap<>();
     private final String cacheKeyPrefix;
     private final String allEntitiesKey;
 
@@ -98,6 +112,15 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
     }
 
+    /**
+     * A non-receiver deletes straight from the database a copy read from Redis, whose
+     * {@code @Version} may be behind the row's (see {@link #applyInTransaction}).
+     */
+    @Override
+    protected void beforeMerge(Session session, T entity) {
+        alignVersion(session, entity, entity.getId());
+    }
+
     /** Removes one entity from Redis, leaving the database alone. */
     protected void evictFromCache(Object id) {
         RedisManager.get().delete(cacheKeyPrefix + id);
@@ -107,7 +130,20 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         return RedisManager.get().findAll(allEntitiesKey, type);
     }
 
+    /**
+     * Serialized so that the flush worker and a caller (see {@link #executeDelete}) never
+     * commit two batches of the same queue concurrently, possibly out of order.
+     */
     public void flushUpdates() {
+        flushLock.lock();
+        try {
+            flushPending();
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    private void flushPending() {
         List<DatabaseAction<T>> batch = new ArrayList<>();
         DatabaseAction<T> retry;
         while ((retry = retryQueue.pollFirst()) != null) {
@@ -122,10 +158,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         try {
             applyInTransaction(batch);
         } catch (Exception e) {
-            if (isStaleRow(e)) {
-                // One entity's row was deleted or changed meanwhile, which fails the whole
-                // transaction. Replaying the batch as is would fail forever and block every later
-                // write of this type, so apply each action on its own and drop only the stale ones.
+            if (isStaleRow(e) || rejection(e) != null) {
+                // One entity's row was deleted or changed meanwhile, or the database refuses one
+                // entity's state, which fails the whole transaction. Replaying the batch as is
+                // would fail forever and block every later write of this type, so apply each
+                // action on its own and drop only the failing ones.
                 flushIndividually(batch);
                 return;
             }
@@ -133,6 +170,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 retryQueue.addFirst(batch.get(i));
             }
             LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+            return;
+        }
+        for (int i = 0; i < batch.size(); i++) {
+            constraintRejections.remove(batch.get(i));
+            evictCommittedDelete(batch, i);
         }
     }
 
@@ -141,10 +183,25 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             DatabaseAction<T> item = batch.get(i);
             try {
                 applyInTransaction(List.of(item));
+                constraintRejections.remove(item);
+                evictCommittedDelete(batch, i);
             } catch (Exception e) {
                 if (isStaleRow(e)) {
+                    constraintRejections.remove(item);
                     LOG.warning("Dropped " + item.getType() + " of " + type.getSimpleName() + " "
                             + item.getEntity().getId() + ": " + staleReason(item.getEntity()));
+                    refreshDropped(item, batch, i);
+                    continue;
+                }
+                Rejection rejection = rejection(e);
+                boolean retry = rejection == Rejection.RETRYABLE
+                        && constraintRejections.merge(item, 1, Integer::sum) <= MAX_CONSTRAINT_RETRIES;
+                if (rejection != null && !retry) {
+                    // Retrying cannot succeed (any more): the same state would be refused again.
+                    constraintRejections.remove(item);
+                    LOG.severe("Dropped " + item.getType() + " of " + type.getSimpleName() + " "
+                            + item.getEntity().getId() + ", rejected by the database: " + e.getMessage());
+                    refreshDropped(item, batch, i);
                     continue;
                 }
                 // Stop at the first other failure and retry it with everything after it, so a
@@ -156,6 +213,44 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 return;
             }
         }
+    }
+
+    /**
+     * A dropped write leaves Redis holding a state the database never got: replace it with the
+     * row's (a plain eviction would drop the row from all() and query(), which read the cache as
+     * the whole table). Unless a later write of the same entity is still to be applied, whose
+     * state the cache holds and must keep serving.
+     */
+    private void refreshDropped(DatabaseAction<T> dropped, List<DatabaseAction<T>> batch, int index) {
+        Object id = dropped.getEntity().getId();
+        if (id == null || hasLaterAction(id, batch, index)) {
+            return;
+        }
+        try {
+            T row = super.findById(id);
+            if (row != null) {
+                RedisManager.get().save(cacheKeyPrefix + id, row);
+            } else {
+                evictFromCache(id);
+            }
+        } catch (RuntimeException e) {
+            LOG.warning("Failed to refresh " + type.getSimpleName() + " " + id + " in the cache: " + e.getMessage());
+        }
+    }
+
+    /** Whether an action on this id follows position {@code index} of the batch, or is queued. */
+    private boolean hasLaterAction(Object id, List<DatabaseAction<T>> batch, int index) {
+        for (int j = index + 1; j < batch.size(); j++) {
+            if (id.equals(batch.get(j).getEntity().getId())) {
+                return true;
+            }
+        }
+        for (DatabaseAction<T> queued : updateQueue) {
+            if (id.equals(queued.getEntity().getId())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String staleReason(T entity) {
@@ -179,7 +274,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                         // Merging a detached entity whose row was deleted throws an
                         // optimistic-lock exception (see alignVersion for @Version entities).
                         case SAVE -> {
-                            alignVersion(session, entity);
+                            // The copy saved here and served back from Redis keeps the version
+                            // it was read with, while every flush increments the row's: without
+                            // this, each save after the first would be dropped as stale. The
+                            // cache is last-writer-wins, like for unversioned entities.
+                            alignVersion(session, entity, entity.getId());
                             session.merge(entity);
                         }
                         case DELETE -> {
@@ -207,36 +306,57 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     }
 
     /**
-     * Gives a {@code @Version} entity the version its row currently has. The copy saved here
-     * and served back from Redis keeps the version it was read with, while every flush
-     * increments the row's: without this, each save after the first would fail the version
-     * check and be dropped as stale. The cache is last-writer-wins, like for unversioned
-     * entities. A deleted row is left alone, so its merge still fails and is dropped.
+     * delete() evicted the entity when it was queued, but a read before the delete was committed
+     * found the row still in the database and cached it again: evict once the row is really gone.
      */
-    private void alignVersion(Session session, T entity) {
-        Field versionField = VERSION_FIELD_CACHE.computeIfAbsent(entity.getClass(), c -> {
-            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
-                for (Field f : current.getDeclaredFields()) {
-                    if (f.isAnnotationPresent(Version.class)) {
-                        f.setAccessible(true);
-                        return Optional.of(f);
-                    }
-                }
-            }
-            return Optional.empty();
-        }).orElse(null);
-        if (versionField == null || entity.getId() == null) {
-            return;
+    private void evictCommittedDelete(List<DatabaseAction<T>> batch, int index) {
+        DatabaseAction<T> item = batch.get(index);
+        Object id = item.getEntity().getId();
+        if (item.getType() == DatabaseAction.Type.DELETE && id != null && !hasLaterAction(id, batch, index)) {
+            evictQuietly(id);
         }
-        T current = session.find(type, entity.getId());
-        if (current == null) {
-            return;
-        }
+    }
+
+    /**
+     * Evicts after a flush step, whose database side is already settled: a Redis failure here
+     * must not abort the flush, which would lose the rest of the batch.
+     */
+    private void evictQuietly(Object id) {
         try {
-            versionField.set(entity, versionField.get(current));
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Cannot access @Version field of " + type.getSimpleName(), e);
+            evictFromCache(id);
+        } catch (RuntimeException e) {
+            LOG.warning("Failed to evict " + type.getSimpleName() + " " + id + " from the cache: " + e.getMessage());
         }
+    }
+
+    private enum Rejection {
+        /** Refused for the entity's own state: replaying it fails the same way. */
+        PERMANENT,
+        /** Refused against other rows (foreign key, unique): may pass once other writes commit. */
+        RETRYABLE
+    }
+
+    /**
+     * Whether the database refused the entity's state (constraint violation, value out of range
+     * or too long, missing non-null property), unlike a lost connection or a lock timeout; null
+     * for any other failure.
+     */
+    private static Rejection rejection(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof org.hibernate.exception.ConstraintViolationException cve) {
+                return switch (cve.getKind()) {
+                    case NOT_NULL, CHECK -> Rejection.PERMANENT;
+                    // Each repository flushes on its own: a child's delete queued in another
+                    // repository may commit after its parent's, which fails until then.
+                    case FOREIGN_KEY, UNIQUE, OTHER -> Rejection.RETRYABLE;
+                };
+            }
+            if (t instanceof org.hibernate.exception.DataException
+                    || t instanceof org.hibernate.PropertyValueException) {
+                return Rejection.PERMANENT;
+            }
+        }
+        return null;
     }
 
     /** Whether the failure is an optimistic-lock one: the entity's row was deleted or changed meanwhile. */
@@ -274,6 +394,44 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         } else {
             return new ArrayList<>();
         }
+    }
+
+    /**
+     * Database reads end up in Redis, which stores association collections as their elements'
+     * ids and element collections as values: either way a lazy collection must be loaded while
+     * the session is open, or caching the entity throws.
+     */
+    @Override
+    protected void prepareDetached(Session session, T entity) {
+        try {
+            for (Field field : getCollectionFields(entity.getClass())) {
+                Object value = field.get(entity);
+                if (value != null && !Hibernate.isInitialized(value)) {
+                    Hibernate.initialize(value);
+                }
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot read the collections of " + type.getSimpleName(), e);
+        }
+    }
+
+    /** The association and element collections of {@code clazz} and its superclasses, made accessible once. */
+    private static List<Field> getCollectionFields(Class<?> clazz) {
+        return COLLECTION_FIELDS_CACHE.computeIfAbsent(clazz, c -> {
+            List<Field> fields = new ArrayList<>();
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field field : current.getDeclaredFields()) {
+                    if (!Modifier.isStatic(field.getModifiers())
+                            && (field.isAnnotationPresent(OneToMany.class)
+                                || field.isAnnotationPresent(ManyToMany.class)
+                                || field.isAnnotationPresent(ElementCollection.class))) {
+                        field.setAccessible(true);
+                        fields.add(field);
+                    }
+                }
+            }
+            return List.copyOf(fields);
+        });
     }
 
     // --- QUERY BUILDER EXECUTION (cache-first) ---
@@ -344,6 +502,12 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     @Override
     protected int executeDelete(QueryBuilder<T> builder) {
         validateQueryFields(builder);
+        if (RedisManager.get().isReceiver()) {
+            // The delete runs against the database, but rows are matched on the cache, which
+            // already holds the queued writes: apply them first, or the delete misses rows the
+            // cache matched and a queued write then brings a deleted row back.
+            flushUpdates();
+        }
         List<Object> matchedIds = new ArrayList<>();
         if (builder.hasRawConditions()) {
             // Raw HQL cannot be evaluated in memory, and evicting on the other conditions alone
@@ -481,6 +645,9 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         if (fieldValue == null || pattern == null) return false;
         String value = fieldValue.toString();
         String pat = pattern.toString();
+        if (LIKE_PATTERN_CACHE.size() >= LIKE_PATTERN_CACHE_MAX) {
+            LIKE_PATTERN_CACHE.clear();
+        }
         Pattern compiled = LIKE_PATTERN_CACHE.computeIfAbsent(pat, p -> {
             String regex = "^" + Pattern.quote(p)
                 .replace("%", "\\E.*\\Q")

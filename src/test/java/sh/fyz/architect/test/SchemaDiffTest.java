@@ -215,6 +215,20 @@ public class SchemaDiffTest {
     // ── Enums ────────────────────────────────────────────────────────────────
 
     @Test
+    @Order(16)
+    @DisplayName("colonne retiree en camelCase : le DROP suggere garde la casse et s'execute")
+    void testRemovalKeepsIdentifierCase() throws Exception {
+        applyAdditive(diff(CamelCaseItem.class));
+
+        SchemaDiff.Result result = diff(CamelCaseItemTrimmed.class);
+        assertEquals(1, result.removals().size(), "displayName went: " + result.removals());
+        String sql = result.removals().get(0).sql();
+        assertEquals("ALTER TABLE \"DiffCamel\" DROP COLUMN \"displayName\"", sql);
+        exec(sql);
+        assertTrue(diff(CamelCaseItemTrimmed.class).isEmpty(), "must converge once the drop is applied");
+    }
+
+    @Test
     @Order(22)
     @DisplayName("contraintes enum d'un snapshot : rejouables apres le CREATE TABLE")
     void testSnapshotEnumConstraintsReplay() throws Exception {

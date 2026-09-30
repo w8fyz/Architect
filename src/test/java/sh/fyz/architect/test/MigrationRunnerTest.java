@@ -453,4 +453,46 @@ public class MigrationRunnerTest {
                 () -> new MigrationRunner(architect, migrationDir,
                         MigrationRunner.HISTORY_TABLE + "_x; DROP TABLE"));
     }
+
+    @Test
+    @Order(90)
+    @DisplayName("baseline : ne reecrit jamais un fichier existant, refuse une version deja prise")
+    void testBaselineNeverRewritesAFile() throws Exception {
+        Path dir = Files.createTempDirectory("architect-baseline-test-");
+        String history = MigrationRunner.HISTORY_TABLE + "_baseline_test";
+        MigrationRunner r = new MigrationRunner(architect, dir, history);
+        try {
+            r.manager().executeSql("DROP TABLE IF EXISTS " + history);
+            MigrationRunner.Available first = r.baseline("1");
+            Path file = dir.resolve(first.filename());
+            // Committed, then edited by hand: no longer what a fresh snapshot would produce.
+            Files.writeString(file, Files.readString(file) + "-- reviewed\n");
+            String committed = Files.readString(file);
+
+            // A second database adopted at the same point.
+            r.manager().executeSql("DROP TABLE " + history);
+            r.baseline("1");
+            assertEquals(committed, Files.readString(file), "the committed file must not be rewritten");
+            assertTrue(r.verify().isEmpty(), "the recorded checksum must be the file's: " + r.verify());
+
+            // A dotted version is written V1_5: the same version, found again.
+            r.manager().executeSql("DROP TABLE " + history);
+            Files.delete(file);
+            MigrationRunner.Available dotted = r.baseline("1.5");
+            r.manager().executeSql("DROP TABLE " + history);
+            assertEquals(dotted.filename(), r.baseline("1.5").filename());
+
+            Files.writeString(dir.resolve("V2__other.sql"), "SELECT 1;");
+            r.manager().executeSql("DROP TABLE " + history);
+            assertThrows(IllegalStateException.class, () -> r.baseline("2"));
+            assertFalse(Files.exists(dir.resolve("V2__baseline.sql")));
+        } finally {
+            r.manager().executeSql("DROP TABLE IF EXISTS " + history);
+            try (var files = Files.walk(dir)) {
+                files.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                });
+            }
+        }
+    }
 }

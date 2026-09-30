@@ -60,6 +60,7 @@ public class Gadget implements IdentifiableEntity {
     public Long getId() { return id; }
     public long getVersion() { return version; }
     public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
     public String getCategory() { return category; }
     public Integer getQty() { return qty; }
     public void setQty(Integer qty) { this.qty = qty; }

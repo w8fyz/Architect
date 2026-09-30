@@ -130,8 +130,9 @@ public class RedisQueueActionPool {
                 threadPool.shutdownNow();
                 Thread.currentThread().interrupt();
             }
-            // A worker still running would flush the same queues concurrently, and two
-            // transactions writing one entity could commit its states out of order.
+            // A worker still running would drain the relayed actions concurrently (cached
+            // repositories serialize their own flushes), and two transactions writing one
+            // entity could commit its states out of order.
             if (threadPool.isTerminated()) {
                 flushRemaining();
             } else {

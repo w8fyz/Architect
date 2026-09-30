@@ -41,9 +41,14 @@ public class MySQLAuth extends SQLAuthProvider {
         return base + tlsParams();
     }
 
+    /**
+     * DISABLE adds nothing, like for PostgreSQL: {@code useSSL=false} would force plaintext over
+     * the driver's own default ({@code PREFERRED}), and a plaintext login with MySQL 8's default
+     * {@code caching_sha2_password} fails with "Public Key Retrieval is not allowed".
+     */
     private String tlsParams() {
         return switch (tlsMode) {
-            case DISABLE -> "?useSSL=false";
+            case DISABLE -> "";
             case PREFER -> "?useSSL=true";
             case REQUIRE -> "?useSSL=true&requireSSL=true";
             case VERIFY_CA -> "?useSSL=true&requireSSL=true&verifyServerCertificate=true";
