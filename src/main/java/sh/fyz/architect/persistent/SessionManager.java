@@ -47,10 +47,10 @@ public class SessionManager {
             this.authProvider = authProvider;
             if (authProvider != null) {
                 Properties settings = new Properties();
-                settings.put(Environment.DRIVER, authProvider.getDriver());
-                settings.put(Environment.URL, jdbcUrl);
-                settings.put(Environment.USER, user);
-                settings.put(Environment.PASS, password);
+                settings.put(Environment.JAKARTA_JDBC_DRIVER, authProvider.getDriver());
+                settings.put(Environment.JAKARTA_JDBC_URL, jdbcUrl);
+                settings.put(Environment.JAKARTA_JDBC_USER, user);
+                settings.put(Environment.JAKARTA_JDBC_PASSWORD, password);
                 settings.put(Environment.DIALECT, authProvider.getDialect());
                 settings.put(Environment.HBM2DDL_AUTO, hbm2ddlAuto != null ? hbm2ddlAuto : "update");
                 settings.put(Environment.SHOW_SQL, "false");

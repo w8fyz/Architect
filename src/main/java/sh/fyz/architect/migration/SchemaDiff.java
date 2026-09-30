@@ -478,10 +478,10 @@ public class SchemaDiff {
 
     private Map<String, Object> settings() {
         Map<String, Object> settings = new HashMap<>();
-        settings.put(AvailableSettings.DRIVER, target.getDriver());
-        settings.put(AvailableSettings.URL, target.getUrl());
-        settings.put(AvailableSettings.USER, user);
-        settings.put(AvailableSettings.PASS, password);
+        settings.put(AvailableSettings.JAKARTA_JDBC_DRIVER, target.getDriver());
+        settings.put(AvailableSettings.JAKARTA_JDBC_URL, target.getUrl());
+        settings.put(AvailableSettings.JAKARTA_JDBC_USER, user);
+        settings.put(AvailableSettings.JAKARTA_JDBC_PASSWORD, password);
         settings.put(AvailableSettings.DIALECT, target.getDialect());
         settings.put(AvailableSettings.GLOBALLY_QUOTED_IDENTIFIERS, "true");
         settings.put(AvailableSettings.HBM2DDL_AUTO, "none");

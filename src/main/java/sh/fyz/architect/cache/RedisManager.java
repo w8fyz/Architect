@@ -11,6 +11,7 @@ import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
 import redis.clients.jedis.*;
 import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.params.SetParams;
 import redis.clients.jedis.resps.ScanResult;
 
 import java.lang.reflect.Field;
@@ -190,7 +191,7 @@ public class RedisManager {
             String prefixedKey = keyPrefix + key;
             String value = objectMapper.writeValueAsString(processedEntity);
             if (defaultTtlSeconds > 0) {
-                jedis.setex(prefixedKey, defaultTtlSeconds, value);
+                jedis.set(prefixedKey, value, SetParams.setParams().ex(defaultTtlSeconds));
             } else {
                 jedis.set(prefixedKey, value);
             }

@@ -151,7 +151,7 @@ public class GenericRepository<T> {
 
     public T findById(Object id) {
         try (Session session = openReadOnlySession()) {
-            return session.get(type, id);
+            return session.find(type, id);
         }
     }
 

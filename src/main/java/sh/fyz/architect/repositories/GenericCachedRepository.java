@@ -112,6 +112,56 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
         if (batch.isEmpty()) return;
 
+        try {
+            applyInTransaction(batch);
+        } catch (Exception e) {
+            if (isStaleRow(e)) {
+                // One entity's row was deleted or changed meanwhile, which fails the whole
+                // transaction. Replaying the batch as is would fail forever and block every later
+                // write of this type, so apply each action on its own and drop only the stale ones.
+                flushIndividually(batch);
+                return;
+            }
+            for (int i = batch.size() - 1; i >= 0; i--) {
+                retryQueue.addFirst(batch.get(i));
+            }
+            LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private void flushIndividually(List<DatabaseAction<T>> batch) {
+        for (int i = 0; i < batch.size(); i++) {
+            DatabaseAction<T> item = batch.get(i);
+            try {
+                applyInTransaction(List.of(item));
+            } catch (Exception e) {
+                if (isStaleRow(e)) {
+                    LOG.warning("Dropped " + item.getType() + " of " + type.getSimpleName() + " "
+                            + item.getEntity().getId() + ": " + staleReason(item.getEntity()));
+                    continue;
+                }
+                // Stop at the first other failure and retry it with everything after it, so a
+                // later write of the same entity cannot commit before an earlier one.
+                for (int j = batch.size() - 1; j >= i; j--) {
+                    retryQueue.addFirst(batch.get(j));
+                }
+                LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+                return;
+            }
+        }
+    }
+
+    private String staleReason(T entity) {
+        try {
+            return super.findById(entity.getId()) == null
+                    ? "its row was deleted from the database"
+                    : "version conflict, the row was changed since this entity was read";
+        } catch (Exception e) {
+            return "its row was deleted or changed meanwhile";
+        }
+    }
+
+    private void applyInTransaction(List<DatabaseAction<T>> batch) {
         try (Session session = sh.fyz.architect.persistent.SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
@@ -119,10 +169,15 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 for (DatabaseAction<T> item : batch) {
                     T entity = item.getEntity();
                     switch (item.getType()) {
+                        // Merging a detached entity whose row was deleted, or whose @Version is
+                        // behind the database, throws an optimistic-lock exception.
                         case SAVE -> session.merge(entity);
                         case DELETE -> {
-                            Object managed = session.merge(entity);
-                            session.remove(managed);
+                            // A null id was never persisted, so there is no row to delete.
+                            T managed = entity.getId() == null ? null : session.find(type, entity.getId());
+                            if (managed != null) {
+                                session.remove(managed);
+                            }
                         }
                     }
                     count++;
@@ -132,16 +187,24 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                     }
                 }
                 transaction.commit();
-            } catch (Exception e) {
+            } catch (RuntimeException e) {
                 if (transaction.isActive()) {
                     transaction.rollback();
                 }
-                for (int i = batch.size() - 1; i >= 0; i--) {
-                    retryQueue.addFirst(batch.get(i));
-                }
-                LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+                throw e;
             }
         }
+    }
+
+    /** Whether the failure is an optimistic-lock one: the entity's row was deleted or changed meanwhile. */
+    private static boolean isStaleRow(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof jakarta.persistence.OptimisticLockException
+                    || t instanceof org.hibernate.StaleStateException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
