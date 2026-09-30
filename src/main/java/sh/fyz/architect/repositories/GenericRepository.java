@@ -1,5 +1,6 @@
 package sh.fyz.architect.repositories;
 
+import jakarta.persistence.Id;
 import sh.fyz.architect.persistent.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -7,6 +8,7 @@ import org.hibernate.query.Query;
 
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.UUID;
@@ -18,7 +20,8 @@ public class GenericRepository<T> {
     protected final Class<T> type;
 
     private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Class<?>, Field> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+    // Optional because ConcurrentHashMap cannot hold null, and "no id field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
@@ -72,14 +75,25 @@ public class GenericRepository<T> {
 
     // --- ID PREPARATION ---
 
+    /**
+     * The {@code @Id} field, searched up the hierarchy so an id inherited from a
+     * {@code @MappedSuperclass} is found; falls back to a field named {@code id}.
+     */
     private Field getIdField(Class<?> clazz) {
         return ID_FIELD_CACHE.computeIfAbsent(clazz, c -> {
-            try {
-                return c.getDeclaredField("id");
-            } catch (NoSuchFieldException e) {
-                return null;
+            Field named = null;
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field f : current.getDeclaredFields()) {
+                    if (f.isAnnotationPresent(Id.class)) {
+                        return Optional.of(f);
+                    }
+                    if (named == null && f.getName().equals("id")) {
+                        named = f;
+                    }
+                }
             }
-        });
+            return Optional.ofNullable(named);
+        }).orElse(null);
     }
 
     public Object prepareEntityId(String value) {
@@ -136,7 +150,7 @@ public class GenericRepository<T> {
     }
 
     public T findById(Object id) {
-        try (Session session = SessionManager.get().getSession()) {
+        try (Session session = openReadOnlySession()) {
             return session.get(type, id);
         }
     }
@@ -153,7 +167,7 @@ public class GenericRepository<T> {
     }
 
     public List<T> all() {
-        try (Session session = SessionManager.get().getSession()) {
+        try (Session session = openReadOnlySession()) {
             return session.createQuery("from " + type.getName(), type).list();
         }
     }
@@ -210,7 +224,7 @@ public class GenericRepository<T> {
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
         validateQueryFields(builder);
 
-        try (Session session = SessionManager.get().getSession()) {
+        try (Session session = openReadOnlySession()) {
             String hql = buildSelectHql(builder);
             Query<T> query = session.createQuery(hql, type);
             bindParameters(query, builder);
@@ -261,6 +275,17 @@ public class GenericRepository<T> {
                 throw new RuntimeException("Failed to execute delete query: " + e.getMessage(), e);
             }
         }
+    }
+
+    /**
+     * A session for queries whose results are returned detached. Read-only entities skip the
+     * copy of their loaded state Hibernate otherwise keeps for dirty checking — pure overhead
+     * here, since the session closes before the caller could modify anything.
+     */
+    private Session openReadOnlySession() {
+        Session session = SessionManager.get().getSession();
+        session.setDefaultReadOnly(true);
+        return session;
     }
 
     // --- HQL BUILDING ---

@@ -10,14 +10,11 @@ import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.persistent.SessionManager;
 import sh.fyz.architect.repositories.GenericRepository;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 public class EntityChannelPubSub<T> {
 
     private static final Logger LOG = Logger.getLogger(EntityChannelPubSub.class.getName());
-    private static final Set<String> channels = ConcurrentHashMap.newKeySet();
 
     private static final long INITIAL_BACKOFF_MS = 100L;
     private static final long MAX_BACKOFF_MS = 5_000L;
@@ -45,29 +42,47 @@ public class EntityChannelPubSub<T> {
         }
     }
 
+    /**
+     * Starts listening on this entity's channel. Only the receiver consumes relayed actions (it
+     * is the only instance that writes to the database), so other instances do not subscribe:
+     * they would hold a Redis connection open just to queue messages nobody processes.
+     */
     public void subscribe() {
-        if (!channels.add(channelName)) {
+        RedisManager manager = RedisManager.get();
+        if (!manager.isReceiver() || !manager.registerSubscription(channelName, this)) {
             return;
         }
 
-        RedisManager.get().getPubSubExecutor().submit(this::subscribeLoop);
+        manager.getPubSubExecutor().submit(() -> subscribeLoop(manager));
     }
 
-    private void subscribeLoop() {
+    /**
+     * Bound to the manager that started it: after {@code stop()} / {@code start()} a new manager
+     * starts its own loop, and this one must not carry on against the new instance.
+     */
+    private void subscribeLoop(RedisManager manager) {
         long backoff = INITIAL_BACKOFF_MS;
-        while (RedisManager.isInitialized() && RedisManager.get().isAlive()) {
-            try (Jedis jedis = RedisManager.get().getJedisPool().getResource()) {
+        while (manager.isAlive()) {
+            try (Jedis jedis = manager.openSubscriberConnection()) {
                 JedisPubSub pubSub = new JedisPubSub() {
                     @Override
                     public void onMessage(String channel, String message) {
                         handleMessage(message);
+                    }
+
+                    @Override
+                    public void onSubscribe(String channel, int subscribedChannels) {
+                        // Shutdown may have run unsubscribe() before this subscription existed.
+                        if (!manager.isAlive()) {
+                            unsubscribe();
+                        }
                     }
                 };
                 activeSubscription = pubSub;
                 jedis.subscribe(pubSub, channelName);
                 backoff = INITIAL_BACKOFF_MS;
             } catch (JedisException e) {
-                if (!RedisManager.isInitialized() || !RedisManager.get().isAlive()) {
+                if (!manager.isAlive()) {
                     return;
                 }
                 LOG.warning("Pub/sub connection for channel " + channelName + " lost: " + e.getMessage()
@@ -75,6 +90,9 @@ public class EntityChannelPubSub<T> {
                 sleepQuietly(backoff);
                 backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
             } catch (Exception e) {
+                if (!manager.isAlive()) {
+                    return;
+                }
                 LOG.warning("Pub/sub loop for channel " + channelName + " failed: " + e.getMessage());
                 sleepQuietly(backoff);
                 backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
@@ -104,8 +122,8 @@ public class EntityChannelPubSub<T> {
     }
 
     /**
-     * Signals the subscribe loop to exit. Called from {@link RedisManager#shutdown()} indirectly
-     * via the {@code isAlive} flag; this call unblocks the blocking {@code jedis.subscribe}.
+     * Unblocks the blocking {@code jedis.subscribe}. Called by {@link RedisManager#shutdown()}
+     * after it clears the {@code isAlive} flag, so the loop then exits instead of resubscribing.
      */
     public void unsubscribe() {
         JedisPubSub pubSub = activeSubscription;

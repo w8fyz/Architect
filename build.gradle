@@ -47,6 +47,9 @@ dependencies {
     api "org.hibernate.orm:hibernate-core:6.6.23.Final"
     api "jakarta.persistence:jakarta.persistence-api:3.2.0"
 
+    // Without this module Hibernate cannot find its Hikari ConnectionProvider: it ignores every
+    // hibernate.hikari.* setting and silently falls back to its built-in, non-production pool.
+    implementation "org.hibernate.orm:hibernate-hikaricp:6.6.23.Final"
     implementation "com.zaxxer:HikariCP:7.0.2"
     implementation 'redis.clients:jedis:7.4.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'

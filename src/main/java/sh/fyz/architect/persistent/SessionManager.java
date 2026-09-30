@@ -22,6 +22,9 @@ import java.util.logging.Logger;
 public class SessionManager {
 
     private static final Logger LOG = Logger.getLogger(SessionManager.class.getName());
+    // java.util.logging only keeps weak references to loggers: without this field the level set
+    // below can be garbage collected along with the logger, and Hibernate's INFO output returns.
+    private static final Logger HIBERNATE_LOG = Logger.getLogger("org.hibernate");
     private static volatile SessionManager instance;
     private static final Object LOCK = new Object();
 
@@ -53,7 +56,7 @@ public class SessionManager {
                 settings.put(Environment.SHOW_SQL, "false");
                 settings.put(Environment.GLOBALLY_QUOTED_IDENTIFIERS, "true");
 
-                Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
+                HIBERNATE_LOG.setLevel(Level.WARNING);
 
                 int maxPool = Math.max(1, poolSize);
                 int minIdle = Math.max(1, maxPool / 4);
@@ -64,6 +67,7 @@ public class SessionManager {
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
                 settings.put("hibernate.hikari.keepaliveTime", "300000");
                 settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
+                settings.put("hibernate.hikari.poolName", "architect");
 
                 settings.put("hibernate.jdbc.batch_size", "20");
                 settings.put("hibernate.order_inserts", "true");
@@ -71,6 +75,10 @@ public class SessionManager {
 
                 settings.put("hibernate.jdbc.fetch_size", "50");
                 settings.put("hibernate.default_batch_fetch_size", "16");
+
+                // Pads IN-list parameters to the next power of two so whereIn() queries of
+                // varying sizes share a handful of SQL strings (and cached plans) instead of one each.
+                settings.put("hibernate.query.in_clause_parameter_padding", "true");
 
                 settings.put("hibernate.generate_statistics", "false");
 

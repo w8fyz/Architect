@@ -20,6 +20,7 @@ public class RedisQueueActionPool {
     private final CopyOnWriteArrayList<GenericCachedRepository<?>> queue = new CopyOnWriteArrayList<>();
     private final ConcurrentLinkedQueue<AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>>> pubSubQueue = new ConcurrentLinkedQueue<>();
     private final ExecutorService threadPool;
+    private final boolean isReceiver;
     private volatile boolean running = true;
 
     public void add(GenericCachedRepository<?> repository) {
@@ -28,11 +29,15 @@ public class RedisQueueActionPool {
     }
 
     public void add(DatabaseAction<?> action, GenericRepository<?> repository) {
+        // Only a receiver drains this queue; elsewhere it would grow without bound.
+        if (!isReceiver) {
+            return;
+        }
         pubSubQueue.add(new AbstractMap.SimpleEntry<>(action, repository));
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public RedisQueueActionPool(boolean isReceiver) {
+        this.isReceiver = isReceiver;
         if (!isReceiver) {
             threadPool = null;
             return;
@@ -68,27 +73,7 @@ public class RedisQueueActionPool {
 
         threadPool.submit(() -> {
             while (running && RedisManager.get().isAlive()) {
-                AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>> entry;
-                while ((entry = pubSubQueue.poll()) != null) {
-                    DatabaseAction<?> action = entry.getKey();
-                    GenericRepository repository = entry.getValue();
-                    try {
-                        String className = action.getClassName();
-                        if (!SessionManager.get().isRegisteredEntity(className)) {
-                            LOG.warning("Rejected action with unknown entity class: " + className);
-                            continue;
-                        }
-                        Class<?> entityClass = SessionManager.get().getEntityClass(className);
-                        Object entity = RedisManager.get().getObjectMapper()
-                            .convertValue(action.getEntity(), entityClass);
-                        switch (action.getType()) {
-                            case SAVE -> repository.save(entity);
-                            case DELETE -> repository.delete(entity);
-                        }
-                    } catch (Exception e) {
-                        LOG.warning("Error processing pub/sub action: " + e.getMessage());
-                    }
-                }
+                drainPubSubQueue();
                 try {
                     Thread.sleep(200);
                 } catch (InterruptedException e) {
@@ -99,6 +84,31 @@ public class RedisQueueActionPool {
         });
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void drainPubSubQueue() {
+        AbstractMap.SimpleEntry<DatabaseAction<?>, GenericRepository<?>> entry;
+        while ((entry = pubSubQueue.poll()) != null) {
+            DatabaseAction<?> action = entry.getKey();
+            GenericRepository repository = entry.getValue();
+            try {
+                String className = action.getClassName();
+                if (!SessionManager.get().isRegisteredEntity(className)) {
+                    LOG.warning("Rejected action with unknown entity class: " + className);
+                    continue;
+                }
+                Class<?> entityClass = SessionManager.get().getEntityClass(className);
+                Object entity = RedisManager.get().getObjectMapper()
+                    .convertValue(action.getEntity(), entityClass);
+                switch (action.getType()) {
+                    case SAVE -> repository.save(entity);
+                    case DELETE -> repository.delete(entity);
+                }
+            } catch (Exception e) {
+                LOG.warning("Error processing pub/sub action: " + e.getMessage());
+            }
+        }
+    }
+
     public void shutdown() {
         running = false;
         if (threadPool != null) {
@@ -106,10 +116,39 @@ public class RedisQueueActionPool {
             try {
                 if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
                     threadPool.shutdownNow();
+                    threadPool.awaitTermination(5, TimeUnit.SECONDS);
                 }
             } catch (InterruptedException e) {
                 threadPool.shutdownNow();
                 Thread.currentThread().interrupt();
+            }
+            // A worker still running would flush the same queues concurrently, and two
+            // transactions writing one entity could commit its states out of order.
+            if (threadPool.isTerminated()) {
+                flushRemaining();
+            } else {
+                LOG.warning("Flush workers did not stop; pending cached writes were not flushed");
+            }
+        }
+    }
+
+    /**
+     * The worker threads poll every 200 ms, so at shutdown up to one interval of writes is still
+     * queued. Those entities exist only in Redis, which the next receiver start clears: without
+     * this last pass they are lost. Needs the database, hence {@code Architect.stop()} shuts
+     * Redis down before Hibernate.
+     */
+    private void flushRemaining() {
+        if (!SessionManager.isInitialized()) {
+            LOG.warning("Database already shut down; pending cached writes could not be flushed");
+            return;
+        }
+        drainPubSubQueue();
+        for (GenericCachedRepository<?> repository : queue) {
+            try {
+                repository.flushUpdates();
+            } catch (Exception e) {
+                LOG.warning("Error flushing updates for repository on shutdown: " + e.getMessage());
             }
         }
     }

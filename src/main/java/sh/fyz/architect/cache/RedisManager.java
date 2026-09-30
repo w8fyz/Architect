@@ -14,6 +14,7 @@ import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.resps.ScanResult;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.*;
@@ -37,6 +38,13 @@ public class RedisManager {
     private final ExecutorService pubSubExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     private static final ConcurrentHashMap<Class<?>, Map<String, Field>> FIELD_CACHE = new ConcurrentHashMap<>();
+    // Optional because ConcurrentHashMap cannot hold null, and "no @Id field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+
+    /** Channel name → its subscriber, so each channel is subscribed once per instance and unsubscribed on shutdown. */
+    private final Map<String, EntityChannelPubSub<?>> subscriptions = new ConcurrentHashMap<>();
+    private final HostAndPort address;
+    private final JedisClientConfig subscriberConfig;
 
     private final boolean isReceiver;
     private volatile boolean isAlive = true;
@@ -47,15 +55,28 @@ public class RedisManager {
                           boolean receiver, int defaultTtlSeconds) {
         JedisPoolConfig config = new JedisPoolConfig();
         config.setMaxTotal(maxConnections);
-        config.setMaxIdle(maxConnections / 2);
+        // At least one idle connection: with maxIdle 0 every returned connection is closed and
+        // the next call pays a new TCP connect + AUTH.
+        config.setMaxIdle(Math.max(1, maxConnections / 2));
         config.setMinIdle(1);
         config.setTestOnBorrow(true);
         config.setTimeBetweenEvictionRuns(java.time.Duration.ofSeconds(30));
         this.jedisPool = new JedisPool(config, host, port, timeout, password);
+        this.address = new HostAndPort(host, port);
+        this.subscriberConfig = DefaultJedisClientConfig.builder()
+                .timeoutMillis(timeout)
+                .password(password)
+                .build();
         this.keyPrefix = "architect:";
         this.defaultTtlSeconds = defaultTtlSeconds;
         if (receiver) {
-            clearArchitectKeys();
+            try {
+                clearArchitectKeys();
+            } catch (RuntimeException e) {
+                // The constructor throws, so nobody else will ever close this pool.
+                jedisPool.close();
+                throw e;
+            }
         }
         this.objectMapper = new ObjectMapper();
         this.objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -92,6 +113,25 @@ public class RedisManager {
 
     public ExecutorService getPubSubExecutor() {
         return pubSubExecutor;
+    }
+
+    /**
+     * A connection outside the pool, for a pub/sub subscription. A subscribed connection is
+     * blocked for as long as the subscription lives; taking it from the pool would permanently
+     * shrink the pool by one per relayed entity type, and exhaust it once there are as many
+     * types as {@code maxConnections} — every later Redis call would then wait forever.
+     */
+    Jedis openSubscriberConnection() {
+        return new Jedis(address, subscriberConfig);
+    }
+
+    /**
+     * Records a channel's subscriber. Returns false when the channel already has one on this
+     * instance. Scoped to the instance rather than static, so that after {@code stop()} /
+     * {@code start()} relay repositories subscribe again.
+     */
+    boolean registerSubscription(String channel, EntityChannelPubSub<?> subscriber) {
+        return subscriptions.putIfAbsent(channel, subscriber) == null;
     }
 
     public RedisQueueActionPool getRedisQueueActionPool() {
@@ -160,21 +200,42 @@ public class RedisManager {
     }
 
     public <T> T find(String key, Class<T> type) {
-        try (Jedis jedis = jedisPool.getResource()) {
-            String data = jedis.get(keyPrefix + key);
-            if (data != null) {
-                Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
-                return reconstructEntity(rawData, type);
+        return find(key, type, new HashMap<>());
+    }
+
+    /**
+     * @param inProgress entities of the graph being rebuilt, by full key. A relation pointing back
+     *                   to one of them (Owner → Pet → Owner) reuses that instance instead of
+     *                   rebuilding it forever.
+     */
+    private <T> T find(String key, Class<T> type, Map<String, Object> inProgress) {
+        String fullKey = keyPrefix + key;
+        Object existing = inProgress.get(fullKey);
+        if (type.isInstance(existing)) {
+            return type.cast(existing);
+        }
+        try {
+            // The connection is released before reconstructing: resolving relations looks up
+            // further keys, and holding one connection per nesting level can drain the pool.
+            String data;
+            try (Jedis jedis = jedisPool.getResource()) {
+                data = jedis.get(fullKey);
             }
-            return null;
+            if (data == null) {
+                return null;
+            }
+            Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
+            return reconstructEntity(rawData, type, fullKey, inProgress);
         } catch (Exception e) {
             throw new RuntimeException("Failed to find entity in Redis: " + e.getMessage(), e);
         }
     }
 
     public <T> List<T> findAll(String pattern, Class<T> type) {
+        // Fetched first and reconstructed after the connection is back in the pool: rebuilding
+        // relations performs lookups of its own (see find).
+        Map<String, String> entries = new LinkedHashMap<>();
         try (Jedis jedis = jedisPool.getResource()) {
-            List<T> result = new ArrayList<>();
             String cursor = ScanParams.SCAN_POINTER_START;
             ScanParams params = new ScanParams().match(keyPrefix + pattern).count(1000);
             do {
@@ -187,26 +248,31 @@ public class RedisManager {
                             responses.add(pipeline.get(key));
                         }
                         pipeline.sync();
-                        for (Response<String> resp : responses) {
-                            String data = resp.get();
+                        for (int i = 0; i < keys.size(); i++) {
+                            String data = responses.get(i).get();
                             if (data != null) {
-                                try {
-                                    Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
-                                    T entity = reconstructEntity(rawData, type);
-                                    if (entity != null) result.add(entity);
-                                } catch (Exception e) {
-                                    LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
-                                }
+                                entries.put(keys.get(i), data);
                             }
                         }
                     }
                 }
                 cursor = scan.getCursor();
             } while (!"0".equals(cursor));
-            return result;
         } catch (Exception e) {
             throw new RuntimeException("Failed to find all entities in Redis: " + e.getMessage(), e);
         }
+
+        List<T> result = new ArrayList<>(entries.size());
+        for (Map.Entry<String, String> entry : entries.entrySet()) {
+            try {
+                Map<String, Object> rawData = objectMapper.readValue(entry.getValue(), MAP_TYPE_REF);
+                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>());
+                if (entity != null) result.add(entity);
+            } catch (Exception e) {
+                LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
+            }
+        }
+        return result;
     }
 
     public void delete(String key) {
@@ -223,6 +289,12 @@ public class RedisManager {
             Class<?> current = c;
             while (current != null && current != Object.class) {
                 for (Field field : current.getDeclaredFields()) {
+                    // Static fields (serialVersionUID, constants, loggers) are not entity state:
+                    // serialising them bloats every entry, and writing a static final one back
+                    // makes reconstructEntity throw. Synthetic fields are compiler artefacts.
+                    if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
+                        continue;
+                    }
                     field.setAccessible(true);
                     fieldMap.putIfAbsent(field.getName(), field);
                 }
@@ -269,9 +341,11 @@ public class RedisManager {
         return jsonMap;
     }
 
-    private <T> T reconstructEntity(Map<String, Object> rawData, Class<T> type) {
+    private <T> T reconstructEntity(Map<String, Object> rawData, Class<T> type,
+                                    String fullKey, Map<String, Object> inProgress) {
         try {
             T entity = type.getDeclaredConstructor().newInstance();
+            inProgress.put(fullKey, entity);
             Map<String, Field> fields = getCachedFields(type);
 
             for (Map.Entry<String, Field> entry : fields.entrySet()) {
@@ -285,7 +359,7 @@ public class RedisManager {
                 } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
                     if (idValue != null) {
-                        Object relatedEntity = find(field.getType().getSimpleName() + ":" + idValue, field.getType());
+                        Object relatedEntity = find(field.getType().getSimpleName() + ":" + idValue, field.getType(), inProgress);
                         field.set(entity, relatedEntity);
                     }
                 } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
@@ -301,7 +375,7 @@ public class RedisManager {
                         Class<?> genericType = getGenericType(field);
                         if (genericType != null) {
                             for (Object idValue : ids) {
-                                Object relatedEntity = find(genericType.getSimpleName() + ":" + idValue, genericType);
+                                Object relatedEntity = find(genericType.getSimpleName() + ":" + idValue, genericType, inProgress);
                                 if (relatedEntity != null) {
                                     relatedEntities.add(relatedEntity);
                                 }
@@ -367,13 +441,14 @@ public class RedisManager {
     }
 
     private Field getIdField(Class<?> clazz) {
-        Map<String, Field> fields = getCachedFields(clazz);
-        for (Field field : fields.values()) {
-            if (field.isAnnotationPresent(Id.class)) {
-                return field;
+        return ID_FIELD_CACHE.computeIfAbsent(clazz, c -> {
+            for (Field field : getCachedFields(c).values()) {
+                if (field.isAnnotationPresent(Id.class)) {
+                    return Optional.of(field);
+                }
             }
-        }
-        return null;
+            return Optional.empty();
+        }).orElse(null);
     }
 
     public void setTTL(String key, int seconds) {
@@ -386,6 +461,11 @@ public class RedisManager {
 
     public void shutdown() {
         isAlive = false;
+        // Unblocks each subscriber's blocking subscribe() so its thread can exit; otherwise
+        // shutdown waits the full 5 s below and the subscriber thread outlives the manager.
+        for (EntityChannelPubSub<?> subscriber : subscriptions.values()) {
+            subscriber.unsubscribe();
+        }
         if (redisQueueActionPool != null) {
             redisQueueActionPool.shutdown();
         }

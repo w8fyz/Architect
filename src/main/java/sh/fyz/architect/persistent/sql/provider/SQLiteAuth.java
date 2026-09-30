@@ -42,9 +42,14 @@ public class SQLiteAuth extends SQLAuthProvider {
         }
     }
 
+    /**
+     * Hibernate 6 ships no SQLite dialect in {@code hibernate-core}; it lives in
+     * {@code org.hibernate.orm:hibernate-community-dialects}, which must be on the classpath
+     * together with the {@code org.xerial:sqlite-jdbc} driver.
+     */
     @Override
     public String getDialect() {
-        return "org.hibernate.dialect.SQLiteDialect";
+        return "org.hibernate.community.dialect.SQLiteDialect";
     }
 
     @Override

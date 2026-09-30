@@ -25,6 +25,14 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     private static final Logger LOG = Logger.getLogger(GenericCachedRepository.class.getName());
     private static final ConcurrentHashMap<String, Pattern> LIKE_PATTERN_CACHE = new ConcurrentHashMap<>();
+    // Reflection lookups are cached: in-memory filtering and relation resolution run once per
+    // cached entity on every query, and getDeclaredField(s) copies Field objects on each call.
+    private static final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>> FIELD_LOOKUP_CACHE =
+            new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Class<?>, List<RelationField>> RELATION_FIELDS_CACHE = new ConcurrentHashMap<>();
+
+    /** A relation-annotated field, with what resolving it needs precomputed. */
+    private record RelationField(Field field, boolean oneToMany, Class<?> elementType, String repositoryName) {}
 
     private final Class<T> type;
     private final ConcurrentLinkedQueue<DatabaseAction<T>> updateQueue = new ConcurrentLinkedQueue<>();
@@ -329,7 +337,6 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         try {
             Field field = findField(entity.getClass(), fieldName);
             if (field == null) return null;
-            field.setAccessible(true);
             return field.get(entity);
         } catch (Exception e) {
             return null;
@@ -345,20 +352,21 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
      */
     private T resolveRelations(T entity) {
         try {
-            HashMap<Class<?>, GenericRepository<?>> repoCache = new HashMap<>();
-            for (Field field : entity.getClass().getDeclaredFields()) {
-                field.setAccessible(true);
-                if (field.isAnnotationPresent(OneToMany.class)) {
+            // Keyed by repository name: keying by field type would make every @OneToMany
+            // collection (all typed List or Set) share whichever repository was looked up first.
+            HashMap<String, GenericRepository<?>> repoCache = new HashMap<>();
+            for (RelationField relation : getRelationFields(entity.getClass())) {
+                Field field = relation.field();
+                if (relation.oneToMany()) {
                     Object raw = field.get(entity);
-                    if (raw instanceof Collection<?> ids && !ids.isEmpty() && isIdCollection(field, ids)) {
+                    if (raw instanceof Collection<?> ids && !ids.isEmpty() && isIdCollection(relation.elementType(), ids)) {
                         Collection<Object> resolvedEntities = new ArrayList<>();
-                        for (Object id : ids) {
-                            String repositoryName = guessRepositoryName(field);
-                            GenericRepository<?> repository = repoCache.computeIfAbsent(
-                                    field.getType(),
-                                    k -> RepositoryRegistry.get().getRepository(repositoryName)
-                            );
-                            if (repository != null) {
+                        GenericRepository<?> repository = repoCache.computeIfAbsent(
+                                relation.repositoryName(),
+                                name -> RepositoryRegistry.get().getRepository(name)
+                        );
+                        if (repository != null) {
+                            for (Object id : ids) {
                                 Object resolvedEntity = repository.findById(id);
                                 if (resolvedEntity != null) {
                                     resolvedEntities.add(resolvedEntity);
@@ -367,8 +375,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                         }
                         field.set(entity, resolvedEntities);
                     }
-                } else if (field.isAnnotationPresent(ManyToOne.class) ||
-                         field.isAnnotationPresent(OneToOne.class)) {
+                } else {
                     Object value = field.get(entity);
                     if (value == null) continue;
 
@@ -376,10 +383,9 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                         continue;
                     }
 
-                    String repositoryName = field.getType().getSimpleName().toLowerCase() + "s";
                     GenericRepository<?> repository = repoCache.computeIfAbsent(
-                            field.getType(),
-                            k -> RepositoryRegistry.get().getRepository(repositoryName)
+                            relation.repositoryName(),
+                            name -> RepositoryRegistry.get().getRepository(name)
                     );
                     if (repository != null) {
                         Object resolvedEntity = repository.findById(value);
@@ -396,12 +402,30 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
     }
 
+    /** The relation fields declared directly on {@code clazz}, made accessible once. */
+    private List<RelationField> getRelationFields(Class<?> clazz) {
+        return RELATION_FIELDS_CACHE.computeIfAbsent(clazz, c -> {
+            List<RelationField> relations = new ArrayList<>();
+            for (Field field : c.getDeclaredFields()) {
+                if (field.isAnnotationPresent(OneToMany.class)) {
+                    field.setAccessible(true);
+                    relations.add(new RelationField(field, true,
+                            resolveCollectionElementType(field), guessRepositoryName(field)));
+                } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
+                    field.setAccessible(true);
+                    relations.add(new RelationField(field, false, null,
+                            field.getType().getSimpleName().toLowerCase() + "s"));
+                }
+            }
+            return List.copyOf(relations);
+        });
+    }
+
     /**
      * Heuristic: an {@code @OneToMany} collection holds raw IDs (from Redis) if the
      * first element is not an instance of the field's generic element type.
      */
-    private boolean isIdCollection(Field field, Collection<?> values) {
-        Class<?> element = resolveCollectionElementType(field);
+    private boolean isIdCollection(Class<?> element, Collection<?> values) {
         if (element == null) return true;
         for (Object v : values) {
             if (v == null) continue;
@@ -429,13 +453,32 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         return field.getName();
     }
 
+    /** The named field, searched up the hierarchy and made accessible; null if absent or inaccessible. */
     private Field findField(Class<?> clazz, String fieldName) {
         if (clazz == null || fieldName == null) return null;
-        try {
-            return clazz.getDeclaredField(fieldName);
-        } catch (NoSuchFieldException e) {
-            if (clazz.getSuperclass() != null) {
-                return findField(clazz.getSuperclass(), fieldName);
+        ConcurrentHashMap<String, Field> fields = FIELD_LOOKUP_CACHE.computeIfAbsent(clazz, c -> new ConcurrentHashMap<>());
+        Field field = fields.get(fieldName);
+        if (field == null) {
+            // Misses are not cached: field names reach here unvalidated, so caching them would
+            // let arbitrary names grow the map without bound.
+            field = lookupField(clazz, fieldName);
+            if (field != null) {
+                fields.putIfAbsent(fieldName, field);
+            }
+        }
+        return field;
+    }
+
+    private static Field lookupField(Class<?> clazz, String fieldName) {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
+            try {
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException e) {
+                // keep walking up
+            } catch (RuntimeException e) {
+                return null;
             }
         }
         return null;
