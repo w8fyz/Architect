@@ -38,7 +38,7 @@ public class MigrationTest {
                 .setReceiver(true)
                 .setDatabaseCredentials(new DatabaseCredentials(
                         new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                        DB_USER, DB_PASS, 2, 2, "update"
+                        DB_USER, DB_PASS, 2, "update"
                 ));
         architect.addEntityClass(Product.class);
         architect.start();

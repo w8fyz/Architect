@@ -37,7 +37,7 @@ public class GenericRepositoryTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(host, port, db),
-                user, pass, 4, 4, "create-drop"
+                user, pass, 4, "create-drop"
             ));
         architect.addEntityClass(Product.class);
         architect.start();

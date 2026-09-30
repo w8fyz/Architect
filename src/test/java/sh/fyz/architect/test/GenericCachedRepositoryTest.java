@@ -41,7 +41,7 @@ public class GenericCachedRepositoryTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(dbHost, dbPort, dbName),
-                dbUser, dbPass, 4, 4, "create-drop"
+                dbUser, dbPass, 4, "create-drop"
             ))
             .setRedisCredentials(new RedisCredentials(
                 redisHost, redisPass, redisPort, 2000, 10

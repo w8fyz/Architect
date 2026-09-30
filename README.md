@@ -100,7 +100,6 @@ architect.setDatabaseCredentials(new DatabaseCredentials(
     new PostgreSQLAuth("localhost", 5432, "mydb"),
     "user", "password",
     10,   // connection pool size
-    10,   // thread pool size (unused: async calls run on virtual threads)
     "update" // hbm2ddl.auto strategy
 ));
 
@@ -147,12 +146,14 @@ new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
 ### DatabaseCredentials
 
 ```java
-// Minimal (defaults: threadPoolSize=10, hbm2ddl="update")
+// Minimal (default hbm2ddl="update")
 new DatabaseCredentials(provider, user, password, poolSize)
 
 // Full control
-new DatabaseCredentials(provider, user, password, poolSize, threadPoolSize, hbm2ddlAuto)
+new DatabaseCredentials(provider, user, password, poolSize, hbm2ddlAuto)
 ```
+
+Async calls run on virtual threads, so there is no thread pool to size: the older constructors taking a `threadPoolSize` are deprecated and ignore it.
 
 `hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"create-only"`, `"validate"`, `"none"`.
 

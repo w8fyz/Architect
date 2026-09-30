@@ -36,7 +36,6 @@ public class ArchitectCoreTest {
             new PostgreSQLAuth("localhost", 5432, "db"),
             "user", "pass", 5
         );
-        assertEquals(10, creds.getThreadPoolSize());
         assertEquals("update", creds.getHbm2ddlAuto());
     }
 
@@ -47,7 +46,7 @@ public class ArchitectCoreTest {
         for (String val : List.of("none", "validate", "update", "create", "create-drop", "create-only")) {
             assertDoesNotThrow(() -> new DatabaseCredentials(
                 new PostgreSQLAuth("localhost", 5432, "db"),
-                "user", "pass", 5, 10, val
+                "user", "pass", 5, val
             ));
         }
     }
@@ -58,12 +57,12 @@ public class ArchitectCoreTest {
     void testCredentialsInvalidHbm2ddl() {
         assertThrows(IllegalArgumentException.class, () -> new DatabaseCredentials(
             new PostgreSQLAuth("localhost", 5432, "db"),
-            "user", "pass", 5, 10, "drop-all"
+            "user", "pass", 5, "drop-all"
         ));
 
         assertThrows(IllegalArgumentException.class, () -> new DatabaseCredentials(
             new PostgreSQLAuth("localhost", 5432, "db"),
-            "user", "pass", 5, 10, "DELETE FROM users"
+            "user", "pass", 5, "DELETE FROM users"
         ));
     }
 
@@ -200,7 +199,7 @@ public class ArchitectCoreTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                DB_USER, DB_PASS, 2, 2, "update"
+                DB_USER, DB_PASS, 2, "update"
             ));
         arch.addEntityClass(Product.class);
 
@@ -216,7 +215,7 @@ public class ArchitectCoreTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                DB_USER, DB_PASS, 2, 2, "update"
+                DB_USER, DB_PASS, 2, "update"
             ));
         arch1.addEntityClass(Product.class);
         arch1.start();
@@ -226,7 +225,7 @@ public class ArchitectCoreTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                DB_USER, DB_PASS, 2, 2, "update"
+                DB_USER, DB_PASS, 2, "update"
             ));
         arch2.addEntityClass(Product.class);
         assertDoesNotThrow(arch2::start);
@@ -288,7 +287,7 @@ public class ArchitectCoreTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                DB_USER, DB_PASS, 2, 2, "update"
+                DB_USER, DB_PASS, 2, "update"
             ));
         arch.addEntityClass(Product.class);
         arch.start();

@@ -97,7 +97,6 @@ public class Architect {
                     databaseCredentials.getUser(),
                     databaseCredentials.getPassword(),
                     databaseCredentials.getPoolSize(),
-                    databaseCredentials.getThreadPoolSize(),
                     databaseCredentials.getHbm2ddlAuto()
                 );
             }

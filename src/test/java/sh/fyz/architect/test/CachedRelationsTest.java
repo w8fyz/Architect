@@ -34,7 +34,7 @@ public class CachedRelationsTest {
                     System.getenv().getOrDefault("DB_NAME", "architect_test")),
                 System.getenv().getOrDefault("DB_USER", "architect"),
                 System.getenv().getOrDefault("DB_PASS", "architect"),
-                4, 2, "create-drop"
+                4, "create-drop"
             ))
             .setRedisCredentials(new RedisCredentials(
                 System.getenv().getOrDefault("REDIS_HOST", "localhost"),

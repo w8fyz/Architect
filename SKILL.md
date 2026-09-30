@@ -70,7 +70,7 @@ Architect architect = new Architect()
     .setReceiver(true)
     .setDatabaseCredentials(new DatabaseCredentials(
         new PostgreSQLAuth("localhost", 5432, "mydb"),
-        "user", "password", 10, 10, "update"
+        "user", "password", 10, "update"
     ));
 architect.addEntityClass(User.class);
 architect.start();
@@ -79,8 +79,9 @@ architect.stop();
 ```
 
 `DatabaseCredentials` overloads:
-- `(provider, user, pass, poolSize)` — defaults: threadPool=10, hbm2ddl="update"
-- `(provider, user, pass, poolSize, threadPoolSize, hbm2ddlAuto)`
+- `(provider, user, pass, poolSize)` — default hbm2ddl="update"
+- `(provider, user, pass, poolSize, hbm2ddlAuto)`
+- the overloads with a `threadPoolSize` are deprecated: it is ignored (async calls run on virtual threads)
 
 SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are only checked for being non-blank and go into the JDBC URL as-is (trusted configuration only); SQLite paths are normalized.
 

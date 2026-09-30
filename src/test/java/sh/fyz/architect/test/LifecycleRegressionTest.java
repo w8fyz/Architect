@@ -130,7 +130,7 @@ public class LifecycleRegressionTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                DB_USER, DB_PASS, poolSize, 2, "update"
+                DB_USER, DB_PASS, poolSize, "update"
             ));
         if (withRedis) {
             arch.setRedisCredentials(new RedisCredentials(REDIS_HOST, REDIS_PASS, REDIS_PORT, 2000, 10));

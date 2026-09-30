@@ -11,18 +11,32 @@ public class DatabaseCredentials {
     private final String user;
     private final String password;
     private final int poolSize;
-    private final int threadPoolSize;
+    private final int threadPoolSize;  // ignored, kept for the deprecated getter
     private final SQLAuthProvider sqlAuthProvider;
     private final String hbm2ddlAuto;
 
+    public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize) {
+        this(sqlAuthProvider, user, password, poolSize, "update");
+    }
+
+    public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize, String hbm2ddlAuto) {
+        this(sqlAuthProvider, user, password, poolSize, 10, hbm2ddlAuto);
+    }
+
+    /**
+     * @deprecated {@code threadPoolSize} is ignored: async calls run on virtual threads. Use
+     *             {@link #DatabaseCredentials(SQLAuthProvider, String, String, int)}.
+     */
+    @Deprecated
     public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize, int threadPoolSize) {
         this(sqlAuthProvider, user, password, poolSize, threadPoolSize, "update");
     }
 
-    public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize) {
-        this(sqlAuthProvider, user, password, poolSize, 10, "update");
-    }
-
+    /**
+     * @deprecated {@code threadPoolSize} is ignored: async calls run on virtual threads. Use
+     *             {@link #DatabaseCredentials(SQLAuthProvider, String, String, int, String)}.
+     */
+    @Deprecated
     public DatabaseCredentials(SQLAuthProvider sqlAuthProvider, String user, String password, int poolSize, int threadPoolSize, String hbm2ddlAuto) {
         if (hbm2ddlAuto != null && !ALLOWED_HBM2DDL.contains(hbm2ddlAuto)) {
             throw new IllegalArgumentException(
@@ -53,6 +67,8 @@ public class DatabaseCredentials {
         return poolSize;
     }
 
+    /** @deprecated Ignored: async calls run on virtual threads. */
+    @Deprecated
     public int getThreadPoolSize() {
         return threadPoolSize;
     }
@@ -64,6 +80,6 @@ public class DatabaseCredentials {
     @Override
     public String toString() {
         return "DatabaseCredentials{user='" + user + "', poolSize=" + poolSize +
-               ", threadPoolSize=" + threadPoolSize + ", hbm2ddlAuto='" + hbm2ddlAuto + "'}";
+               ", hbm2ddlAuto='" + hbm2ddlAuto + "'}";
     }
 }

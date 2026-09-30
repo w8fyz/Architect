@@ -39,7 +39,6 @@ public class SessionManager {
             String user,
             String password,
             int poolSize,
-            int threadPoolSize,
             String hbm2ddlAuto
     ) {
         String jdbcUrl = authProvider != null ? authProvider.getUrl() : null;
@@ -144,6 +143,11 @@ public class SessionManager {
         return authProvider;
     }
 
+    /**
+     * @deprecated {@code threadPoolSize} is ignored: async calls run on virtual threads. Use
+     *             {@link #initialize(List, SQLAuthProvider, String, String, int, String)}.
+     */
+    @Deprecated
     public static void initialize(
             List<Class<? extends IdentifiableEntity>> entityClasses,
             SQLAuthProvider authProvider,
@@ -153,9 +157,20 @@ public class SessionManager {
             int threadPoolSize,
             String hbm2ddlAuto
     ) {
+        initialize(entityClasses, authProvider, user, password, poolSize, hbm2ddlAuto);
+    }
+
+    public static void initialize(
+            List<Class<? extends IdentifiableEntity>> entityClasses,
+            SQLAuthProvider authProvider,
+            String user,
+            String password,
+            int poolSize,
+            String hbm2ddlAuto
+    ) {
         synchronized (LOCK) {
             if (instance == null) {
-                instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, threadPoolSize, hbm2ddlAuto);
+                instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, hbm2ddlAuto);
             } else {
                 throw new IllegalStateException("SessionManager is already initialized!");
             }
