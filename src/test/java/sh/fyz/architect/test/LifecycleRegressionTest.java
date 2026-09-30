@@ -101,10 +101,141 @@ public class LifecycleRegressionTest {
 
     @Test
     @Order(3)
+    @DisplayName("Cache - stop() attend les appels async avant d'arreter Redis")
+    void testStopWaitsForAsyncCalls() throws Exception {
+        architect = start(true, 4);
+        GenericCachedRepository<Product> repository = new GenericCachedRepository<>(Product.class);
+        Product product = repository.save(new Product(MARKER, "Cat", 10.0, 1, true));
+
+        // Writes only once stop() has begun (it clears isStarted() first): that write needs
+        // Redis, then the final flush.
+        Architect stopping = architect;
+        java.util.concurrent.CompletableFuture<Void> call = java.util.concurrent.CompletableFuture.runAsync(() -> {
+            Awaitility.await().atMost(Duration.ofSeconds(4)).until(() -> !stopping.isStarted());
+            product.setStock(42);
+            repository.save(product);
+        }, SessionManager.get().getThreadPool());
+
+        architect.stop();
+        architect = null;
+
+        assertDoesNotThrow(() -> call.get());
+        assertEquals(42, readStock(product.getId()));
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("Relay sans base - stop() attend les appels async avant d'arreter Redis")
+    void testStopWaitsForAsyncCallsWithoutDatabase() throws Exception {
+        architect = new Architect()
+            .setReceiver(false)
+            .setRedisCredentials(new RedisCredentials(REDIS_HOST, REDIS_PASS, REDIS_PORT, 2000, 10));
+        architect.start();
+        var relay = new GenericRelayRepository<Product>(Product.class) {
+            java.util.concurrent.ExecutorService asyncPool() {
+                return threadPool();
+            }
+        };
+        Product product = new Product(MARKER, "Cat", 10.0, 1, true);
+        java.lang.reflect.Field id = Product.class.getDeclaredField("id");
+        id.setAccessible(true);
+        id.set(product, 987654321L); // a non-receiver only updates existing entities
+
+        // On the pool the repository's async calls use, writing only once stop() has begun.
+        Architect stopping = architect;
+        java.util.concurrent.CompletableFuture<Void> call = java.util.concurrent.CompletableFuture.runAsync(() -> {
+            Awaitility.await().atMost(Duration.ofSeconds(4)).until(() -> !stopping.isStarted());
+            relay.save(product);
+        }, relay.asyncPool());
+        architect.stop();
+        architect = null;
+
+        assertDoesNotThrow(() -> call.get());
+        try (RedisClient client = RedisClient.builder()
+                .hostAndPort(REDIS_HOST, REDIS_PORT)
+                .clientConfig(DefaultJedisClientConfig.builder().password(REDIS_PASS).build())
+                .build()) {
+            assertEquals(1, client.del("architect:Product:987654321"), "the cached copy must be written");
+        }
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("Cache - un repository conserve apres stop()/start() ecrit toujours en base")
+    void testCachedRepositorySurvivesRestart() {
+        architect = start(true, 4);
+        GenericCachedRepository<Product> repository = new GenericCachedRepository<>(Product.class);
+        Product product = repository.save(new Product(MARKER, "Cat", 10.0, 1, true));
+        architect.stop();
+
+        architect = start(true, 4);
+        product.setStock(77);
+        repository.save(product); // queued: only a flush worker of the new manager applies it
+        architect.stop();
+        architect = null;
+
+        assertEquals(77, readStock(product.getId()));
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("Cache - base en lecture seule : l'ecriture attend, puis est appliquee et servie apres restart")
+    void testWriteLeftQueuedAtStopIsCachedAfterRestart() {
+        architect = start(true, 4);
+        GenericCachedRepository<Product> repository = new GenericCachedRepository<>(Product.class);
+        Product product = repository.save(new Product(MARKER, "Cat", 10.0, 1, true));
+        setReadOnly(true);
+        try {
+            product.setStock(55);
+            repository.save(product);
+            // Well past the ~5 s after which a write failing for another reason is dropped: a
+            // read-only database (a failover) is unavailable, not a refusal of this write.
+            Awaitility.await().pollDelay(Duration.ofSeconds(7)).atMost(Duration.ofSeconds(8)).until(() -> true);
+            assertTrue(repository.pendingWriteCount() > 0, "the write must still wait for the database");
+            architect.stop(); // the final flush is refused too: the write stays queued
+            architect = null;
+            assertTrue(repository.pendingWriteCount() > 0, "the database must have refused the write");
+        } finally {
+            setReadOnly(false);
+        }
+
+        architect = start(true, 4);
+        Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+            assertEquals(55, readStock(product.getId())));
+        assertEquals(55, repository.findById(product.getId()).getStock(),
+            "the cache loaded at start must not serve the row's older state");
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("Cache - apres restart, le cache charge toute la table sans ecraser une ligne deja en cache")
+    void testCacheLoadsWholeTableAfterRestart() {
+        architect = start(true, 4);
+        GenericRepository<Product> db = new GenericRepository<>(Product.class);
+        Product first = db.save(new Product(MARKER, "Whole", 1.0, 1, true));
+        db.save(new Product(MARKER, "Whole", 2.0, 2, true));
+        db.save(new Product(MARKER, "Whole", 3.0, 3, true));
+        architect.stop();
+
+        architect = start(true, 4);
+        // Another instance sharing Redis caches one row, newer than the database's (a relayed
+        // save still on its way), before this instance reads the type.
+        first.setStock(99);
+        sh.fyz.architect.cache.RedisManager.get().save("Product:" + first.getId(), first);
+        GenericCachedRepository<Product> repository = new GenericCachedRepository<>(Product.class);
+
+        assertEquals(3, repository.query().where("category", "Whole").count(),
+            "one cached row is not the whole table");
+        assertEquals(99, repository.findById(first.getId()).getStock(),
+            "loading the table must not overwrite a newer cached state");
+    }
+
+    @Test
+    @Order(8)
     @DisplayName("Relay - stop() rapide et reabonnement apres restart")
     void testRelayResubscribesAfterRestart() {
         architect = start(true, 4);
-        new GenericRelayRepository<>(Product.class);
+        GenericRelayRepository<Product> relay = new GenericRelayRepository<>(Product.class);
         awaitSubscribers(1);
 
         long startedAt = System.nanoTime();
@@ -112,11 +243,12 @@ public class LifecycleRegressionTest {
         architect = null;
         long stopMillis = Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
         assertTrue(stopMillis < 4000, "stop() must not wait for a blocked subscriber, took " + stopMillis + " ms");
-
-        architect = start(true, 4);
         awaitSubscribers(0);
-        new GenericRelayRepository<>(Product.class);
+
+        // The repository kept across the restart subscribes again on its own.
+        architect = start(true, 4);
         awaitSubscribers(1);
+        assertNotNull(relay);
 
         Product relayed = new Product(MARKER, "Relayed", 5.0, 7, true);
         new EntityChannelPubSub<>(Product.class).publish(new DatabaseAction<>(relayed, DatabaseAction.Type.SAVE));
@@ -176,6 +308,27 @@ public class LifecycleRegressionTest {
         } catch (Exception e) {
             throw new AssertionError(e);
         }
+    }
+
+    /** Makes PostgreSQL refuse writes, like a primary demoted during a failover. */
+    private void setReadOnly(boolean readOnly) {
+        try (Connection c = DriverManager.getConnection(jdbcUrl(), DB_USER, DB_PASS);
+             var stmt = c.createStatement()) {
+            stmt.execute(readOnly
+                ? "ALTER SYSTEM SET default_transaction_read_only = on"
+                : "ALTER SYSTEM RESET default_transaction_read_only");
+            stmt.execute("SELECT pg_reload_conf()");
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+        // The reload is signalled asynchronously: wait until new sessions see it.
+        String expected = readOnly ? "on" : "off";
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> {
+            try (Connection c = DriverManager.getConnection(jdbcUrl(), DB_USER, DB_PASS);
+                 ResultSet rs = c.createStatement().executeQuery("SHOW default_transaction_read_only")) {
+                return rs.next() && expected.equals(rs.getString(1));
+            }
+        });
     }
 
     private void deleteMarkedRows() {

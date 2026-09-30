@@ -24,6 +24,16 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
         }
     }
 
+    /**
+     * Subscribes again on the new Redis manager (the subscription is per manager), at once: a
+     * receiver gets relayed writes without ever calling this repository.
+     */
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        channelPubSub.subscribe();
+    }
+
     @Override
     public T save(T entity) {
         if (!RedisManager.get().isReceiver()) {

@@ -6,7 +6,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -165,42 +164,7 @@ public class ShadowDatabase {
 
     /** Drops everything. PostgreSQL gets the schema recreated; other dialects are dropped table by table. */
     public void clear() {
-        withConnection(connection -> {
-            boolean wasAutoCommit = connection.getAutoCommit();
-            try {
-                connection.setAutoCommit(false);
-                String dialect = shadow.getDialect().toLowerCase(Locale.ROOT);
-                try (Statement stmt = connection.createStatement()) {
-                    if (dialect.contains("postgresql")) {
-                        stmt.execute("DROP SCHEMA public CASCADE");
-                        stmt.execute("CREATE SCHEMA public");
-                    } else if (dialect.contains("mysql") || dialect.contains("mariadb")) {
-                        stmt.execute("SET FOREIGN_KEY_CHECKS = 0");
-                        for (String table : tableNames(connection)) {
-                            stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
-                        }
-                        stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
-                    } else if (dialect.contains("h2")) {
-                        stmt.execute("DROP ALL OBJECTS");
-                    } else if (dialect.contains("sqlite")) {
-                        // SQLite's DROP TABLE has no CASCADE.
-                        for (String table : tableNames(connection)) {
-                            stmt.execute("DROP TABLE IF EXISTS \"" + table + "\"");
-                        }
-                    } else {
-                        for (String table : tableNames(connection)) {
-                            stmt.execute("DROP TABLE IF EXISTS \"" + table + "\" CASCADE");
-                        }
-                    }
-                }
-                connection.commit();
-            } catch (SQLException e) {
-                connection.rollback();
-                throw e;
-            } finally {
-                connection.setAutoCommit(wasAutoCommit);
-            }
-        });
+        withConnection(connection -> SqlDialect.dropAll(connection, shadow.getDialect()));
     }
 
     private void execute(List<String> statements, String label) {
@@ -226,16 +190,6 @@ public class ShadowDatabase {
                 connection.setAutoCommit(wasAutoCommit);
             }
         });
-    }
-
-    private List<String> tableNames(Connection connection) throws SQLException {
-        List<String> tables = new ArrayList<>();
-        try (ResultSet rs = connection.getMetaData().getTables(null, null, null, new String[]{"TABLE"})) {
-            while (rs.next()) {
-                tables.add(rs.getString("TABLE_NAME"));
-            }
-        }
-        return tables;
     }
 
     private interface Work {

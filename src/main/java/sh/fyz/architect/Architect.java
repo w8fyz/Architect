@@ -5,6 +5,7 @@ import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.persistent.DatabaseCredentials;
 import sh.fyz.architect.persistent.SessionManager;
+import sh.fyz.architect.repositories.GenericCachedRepository;
 import sh.fyz.architect.repositories.GenericRepository;
 import sh.fyz.architect.repositories.RepositoryRegistry;
 
@@ -75,8 +76,23 @@ public class Architect {
             return;
         }
 
+        boolean sessionInitialized = false;
         boolean redisInitialized = false;
         try {
+            // The database first: once Redis is up, cached repositories can be called, and their
+            // first call loads the cache from the database.
+            if (databaseCredentials != null) {
+                SessionManager.initialize(
+                    entityClasses,
+                    databaseCredentials.getSQLAuthProvider(),
+                    databaseCredentials.getUser(),
+                    databaseCredentials.getPassword(),
+                    databaseCredentials.getPoolSize(),
+                    databaseCredentials.getHbm2ddlAuto()
+                );
+                sessionInitialized = true;
+            }
+
             if (redisCredentials != null) {
                 RedisManager.initialize(
                     redisCredentials.getHost(),
@@ -88,22 +104,19 @@ public class Architect {
                     redisCredentials.getDefaultTtlSeconds()
                 );
                 redisInitialized = true;
-            }
-
-            if (databaseCredentials != null) {
-                SessionManager.initialize(
-                    entityClasses,
-                    databaseCredentials.getSQLAuthProvider(),
-                    databaseCredentials.getUser(),
-                    databaseCredentials.getPassword(),
-                    databaseCredentials.getPoolSize(),
-                    databaseCredentials.getHbm2ddlAuto()
-                );
+                // Cached repositories created before a stop() (the first start has none).
+                GenericCachedRepository.attachAll();
             }
         } catch (RuntimeException e) {
             if (redisInitialized && RedisManager.isInitialized()) {
                 try {
                     RedisManager.reset();
+                } catch (RuntimeException ignored) {
+                }
+            }
+            if (sessionInitialized && SessionManager.isInitialized()) {
+                try {
+                    SessionManager.reset();
                 } catch (RuntimeException ignored) {
                 }
             }
@@ -117,20 +130,50 @@ public class Architect {
             return;
         }
 
-        // Redis first: its shutdown flushes the pending cached writes, which needs the database.
-        // Each step runs even if an earlier one throws, so nothing stays half-initialized.
-        try {
-            if (redisCredentials != null && RedisManager.isInitialized()) {
-                RedisManager.reset();
-            }
-        } finally {
-            try {
+        // Async calls first: those of cached repositories need Redis, and a write they queue
+        // after Redis' final flush would be lost (without a database, they run on Redis' own
+        // executor, which its shutdown waits for). Then Redis: its shutdown flushes the pending
+        // cached writes, which needs the database. Each step runs even if an earlier one
+        // throws, so nothing stays half-initialized.
+        runAll(
+            () -> {
+                if (SessionManager.isInitialized()) {
+                    SessionManager.get().awaitAsyncCalls();
+                }
+            },
+            () -> {
+                if (redisCredentials != null && RedisManager.isInitialized()) {
+                    RedisManager.reset();
+                }
+            },
+            () -> {
                 if (SessionManager.isInitialized()) {
                     SessionManager.reset();
                 }
-            } finally {
-                RepositoryRegistry.get().clear();
+            },
+            () -> RepositoryRegistry.get().clear()
+        );
+    }
+
+    /** Runs every step, then rethrows the first failure, with the later ones suppressed. */
+    private static void runAll(Runnable... steps) {
+        Throwable failure = null;
+        for (Runnable step : steps) {
+            try {
+                step.run();
+            } catch (RuntimeException | Error e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
             }
+        }
+        if (failure instanceof RuntimeException e) {
+            throw e;
+        }
+        if (failure instanceof Error e) {
+            throw e;
         }
     }
 }

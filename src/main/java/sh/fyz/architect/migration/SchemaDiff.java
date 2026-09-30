@@ -21,9 +21,7 @@ import sh.fyz.architect.persistent.EnumCheckConstraintSynchronizer;
 import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 
 import java.sql.Connection;
-import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -333,26 +331,16 @@ public class SchemaDiff {
     private Map<String, Map<String, String>> liveTables(Map<String, String> originalNames) {
         Map<String, Map<String, String>> out = new LinkedHashMap<>();
         try (Connection connection = DriverManager.getConnection(target.getUrl(), user, password)) {
-            DatabaseMetaData meta = connection.getMetaData();
-            String schema = target.getDialect().toLowerCase(Locale.ROOT).contains("postgresql")
-                    ? "public" : null;
-            List<String> tables = new ArrayList<>();
-            try (ResultSet rs = meta.getTables(null, schema, null, new String[]{"TABLE"})) {
-                while (rs.next()) {
-                    tables.add(rs.getString("TABLE_NAME"));
-                }
-            }
+            List<String> tables = SqlDialect.tableNames(connection, target.getDialect());
             for (String table : tables) {
                 Map<String, String> columns = new LinkedHashMap<>();
                 String tableKey = table.toLowerCase(Locale.ROOT);
-                try (ResultSet rs = meta.getColumns(null, schema, table, null)) {
-                    while (rs.next()) {
-                        String column = rs.getString("COLUMN_NAME");
-                        String columnKey = column.toLowerCase(Locale.ROOT);
-                        columns.put(columnKey, rs.getString("TYPE_NAME"));
-                        originalNames.put(tableKey + "." + columnKey, column);
-                    }
-                }
+                SqlDialect.forEachColumn(connection, target.getDialect(), table, rs -> {
+                    String column = rs.getString("COLUMN_NAME");
+                    String columnKey = column.toLowerCase(Locale.ROOT);
+                    columns.put(columnKey, rs.getString("TYPE_NAME"));
+                    originalNames.put(tableKey + "." + columnKey, column);
+                });
                 out.put(tableKey, columns);
                 originalNames.put(tableKey, table);
             }
@@ -591,13 +579,8 @@ public class SchemaDiff {
         return liveNames.getOrDefault(key, column == null ? table : column);
     }
 
-    /** Quoted in the target's syntax: without ANSI_QUOTES, MySQL reads "x" as a string. */
     private String quote(String identifier) {
-        String dialect = target.getDialect().toLowerCase(Locale.ROOT);
-        if (dialect.contains("mysql") || dialect.contains("mariadb")) {
-            return "`" + identifier.replace("`", "``") + "`";
-        }
-        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+        return SqlDialect.quote(target.getDialect(), identifier);
     }
 
     private static String terminate(String statement) {

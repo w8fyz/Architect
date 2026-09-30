@@ -5,12 +5,15 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Id;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OneToOne;
+import org.hibernate.Hibernate;
 import org.hibernate.Session;
+import org.hibernate.annotations.SortComparator;
 import org.hibernate.proxy.HibernateProxy;
 import redis.clients.jedis.ConnectionPoolConfig;
 import redis.clients.jedis.DefaultJedisClientConfig;
@@ -48,18 +51,38 @@ public class RedisManager {
     private final RedisClient client;
     private final ObjectMapper objectMapper;
     private final ExecutorService pubSubExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    // Async repository calls of an instance without a database, which has no SessionManager
+    // thread pool: owned here so that shutdown waits for them while Redis is still open.
+    private final ExecutorService asyncExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     private static final ConcurrentHashMap<Class<?>, Map<String, Field>> FIELD_CACHE = new ConcurrentHashMap<>();
     // Optional because ConcurrentHashMap cannot hold null, and "no @Id field" must be cached too.
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
 
     /**
-     * A related entity could not be read from the database. Not a corrupt cache entry: findAll
-     * must not skip the entity (and return a partial result as if complete), it rethrows.
+     * A relation of a rebuilt entity. Its targets are in id order, null where not found in Redis,
+     * and {@code ids} holds the ids of those, converted to the {@code @Id} field's type;
+     * {@code collection} is null for a single-valued relation.
      */
-    private static final class RelatedLoadException extends RuntimeException {
-        RelatedLoadException(String message, Throwable cause) {
-            super(message, cause);
+    private record PendingRelation(Object owner, Field field, Class<?> type, List<?> rawIds,
+                                   Object[] targets, Object[] ids, Collection<Object> collection) {
+
+        String key(int index) {
+            return type.getSimpleName() + ":" + rawIds.get(index);
+        }
+
+        /** Sets the field, leaving out targets found nowhere. */
+        void assign() throws IllegalAccessException {
+            if (collection == null) {
+                field.set(owner, targets[0]);
+                return;
+            }
+            for (Object target : targets) {
+                if (target != null) {
+                    collection.add(target);
+                }
+            }
+            field.set(owner, collection);
         }
     }
 
@@ -144,6 +167,11 @@ public class RedisManager {
      */
     public RedisClient getRedisClient() {
         return client;
+    }
+
+    /** Runs the async repository calls of an instance without a database. */
+    public ExecutorService getAsyncExecutor() {
+        return asyncExecutor;
     }
 
     public ExecutorService getPubSubExecutor() {
@@ -231,32 +259,86 @@ public class RedisManager {
     }
 
     public <T> void save(String key, T entity) {
+        save(key, entity, false);
+    }
+
+    /**
+     * Caches the entity unless the key already holds one (SET NX): for a state read from the
+     * database, which a state cached meanwhile may be newer than.
+     */
+    public <T> void saveIfAbsent(String key, T entity) {
+        save(key, entity, true);
+    }
+
+    /**
+     * {@link #saveIfAbsent} for many entities, by key, pipelined: loading a table one round trip
+     * per row takes seconds per ten thousand rows.
+     */
+    public void saveAllIfAbsent(Map<String, ?> entities) {
+        try {
+            SetParams params = SetParams.setParams().nx();
+            if (defaultTtlSeconds > 0) {
+                params.ex(defaultTtlSeconds);
+            }
+            Iterator<? extends Map.Entry<String, ?>> it = entities.entrySet().iterator();
+            while (it.hasNext()) {
+                // In chunks, so that neither side buffers a whole table's replies.
+                try (Pipeline pipeline = client.pipelined()) {
+                    List<Response<String>> replies = new ArrayList<>();
+                    for (int n = 0; n < 1000 && it.hasNext(); n++) {
+                        Map.Entry<String, ?> entry = it.next();
+                        replies.add(pipeline.set(keyPrefix + entry.getKey(),
+                                objectMapper.writeValueAsString(prepareForSave(entry.getValue())), params));
+                    }
+                    pipeline.sync();
+                    // sync() does not report a refused write (out of memory, read-only replica):
+                    // get() throws it, or a partly loaded cache would pass for the whole table.
+                    for (Response<String> reply : replies) {
+                        reply.get();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to save entities to Redis: " + e.getMessage(), e);
+        }
+    }
+
+    private <T> void save(String key, T entity, boolean ifAbsent) {
         try {
             Map<String, Object> processedEntity = prepareForSave(entity);
             String prefixedKey = keyPrefix + key;
             String value = objectMapper.writeValueAsString(processedEntity);
-            if (defaultTtlSeconds > 0) {
-                client.set(prefixedKey, value, SetParams.setParams().ex(defaultTtlSeconds));
-            } else {
-                client.set(prefixedKey, value);
+            SetParams params = SetParams.setParams();
+            if (ifAbsent) {
+                params.nx();
             }
+            if (defaultTtlSeconds > 0) {
+                params.ex(defaultTtlSeconds);
+            }
+            client.set(prefixedKey, value, params);
         } catch (Exception e) {
             throw new RuntimeException("Failed to save entity to Redis: " + e.getMessage(), e);
         }
     }
 
     public <T> T find(String key, Class<T> type) {
-        return find(key, type, new HashMap<>(), new HashMap<>());
+        List<PendingRelation> pending = new ArrayList<>();
+        T entity = find(key, type, new HashMap<>(), pending);
+        resolvePending(pending);
+        return entity;
     }
 
     /**
-     * @param loaded     related entities read from the database (see {@link #findRelated}), by
-     *                   full key, shared by every entity rebuilt in one call
+     * Rebuilds a cached entity, adding its relations to {@code pending}, shared by every entity
+     * rebuilt in one {@link #find} or {@link #findAll} call and set at its end by
+     * {@link #resolvePending}.
+     *
      * @param inProgress entities of the graph being rebuilt, by full key. A relation pointing back
      *                   to one of them (Owner → Pet → Owner) reuses that instance instead of
      *                   rebuilding it forever.
      */
-    private <T> T find(String key, Class<T> type, Map<String, Object> inProgress, Map<String, Object> loaded) {
+    private <T> T find(String key, Class<T> type, Map<String, Object> inProgress,
+                      List<PendingRelation> pending) {
         String fullKey = keyPrefix + key;
         Object existing = inProgress.get(fullKey);
         if (type.isInstance(existing)) {
@@ -270,9 +352,7 @@ public class RedisManager {
                 return null;
             }
             Map<String, Object> rawData = objectMapper.readValue(data, MAP_TYPE_REF);
-            return reconstructEntity(rawData, type, fullKey, inProgress, loaded);
-        } catch (RelatedLoadException e) {
-            throw e;
+            return reconstructEntity(rawData, type, fullKey, inProgress, pending);
         } catch (Exception e) {
             throw new RuntimeException("Failed to find entity in Redis: " + e.getMessage(), e);
         }
@@ -310,20 +390,19 @@ public class RedisManager {
         }
 
         List<T> result = new ArrayList<>(entries.size());
-        // Many cached entities typically point to the same uncached one (every Pet to its Owner):
-        // read each from the database once per call, not once per entity.
-        Map<String, Object> loaded = new HashMap<>();
+        List<PendingRelation> pending = new ArrayList<>();
         for (Map.Entry<String, String> entry : entries.entrySet()) {
             try {
                 Map<String, Object> rawData = objectMapper.readValue(entry.getValue(), MAP_TYPE_REF);
-                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>(), loaded);
+                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>(), pending);
                 if (entity != null) result.add(entity);
-            } catch (RelatedLoadException e) {
-                throw e;
             } catch (Exception e) {
                 LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
             }
         }
+        // Outside the loop: a database failure is not a corrupt entry, and skipping the entities
+        // it concerns would return a partial result as if complete.
+        resolvePending(pending);
         return result;
     }
 
@@ -366,15 +445,22 @@ public class RedisManager {
 
             if (value != null) {
                 if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
-                    if (value instanceof HibernateProxy || getIdField(value.getClass()) != null) {
-                        jsonMap.put(field.getName() + "_id", idOf(value));
+                    // A related entity never saved has no id yet: nothing to point to.
+                    Object relatedId = value instanceof HibernateProxy || getIdField(value.getClass()) != null
+                            ? idOf(value) : null;
+                    if (relatedId != null) {
+                        jsonMap.put(field.getName() + "_id", relatedId);
                     }
                 } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     if (value instanceof Collection) {
                         List<Object> ids = new ArrayList<>();
                         for (Object item : (Collection<?>) value) {
-                            if (item instanceof HibernateProxy || (item != null && getIdField(item.getClass()) != null)) {
-                                ids.add(idOf(item));
+                            // Nor an element never saved: a null id would fail every read of this
+                            // entity, and every query of its type.
+                            Object itemId = item instanceof HibernateProxy || (item != null && getIdField(item.getClass()) != null)
+                                    ? idOf(item) : null;
+                            if (itemId != null) {
+                                ids.add(itemId);
                             }
                         }
                         if (!ids.isEmpty()) {
@@ -401,61 +487,101 @@ public class RedisManager {
     }
 
     /**
-     * Related entities, in the order of their ids. Those not in Redis (their type is not cached,
-     * their key expired...) are read from the database instead, in one query per call: leaving
-     * them out would not only return a wrong entity, saving it back would clear the foreign key
-     * or the collection's rows. Ids found nowhere, or not in Redis on an instance without a
+     * Resolves a relation's targets from Redis; those not there (their type is not cached, their
+     * key expired...) are read from the database by {@link #resolvePending}. Every relation
+     * waits in {@code pending} to be set, even a complete one: a {@code HashSet} files its
+     * elements by hashCode, which may depend on their relations, so the collections are filled
+     * once every single-valued relation of the call is set.
+     */
+    private void relate(Object owner, Field field, Class<?> type, List<?> rawIds, Collection<Object> collection,
+                        Map<String, Object> inProgress, List<PendingRelation> pending) {
+        PendingRelation relation = new PendingRelation(owner, field, type, rawIds,
+                new Object[rawIds.size()], new Object[rawIds.size()], collection);
+        Field idField = getIdField(type);
+        for (int i = 0; i < rawIds.size(); i++) {
+            relation.targets()[i] = find(relation.key(i), type, inProgress, pending);
+            if (relation.targets()[i] == null) {
+                // Converted here, where an unreadable id only fails this entity (JSON reads a
+                // Long id back as an Integer).
+                Object rawId = rawIds.get(i);
+                relation.ids()[i] = idField == null ? rawId : objectMapper.convertValue(rawId, idField.getType());
+            }
+        }
+        pending.add(relation);
+    }
+
+    /**
+     * Reads the targets missing from Redis from the database, then sets the pending relations:
+     * single-valued ones first, then collections (see {@link #relate}).
+     * Leaving those targets out would not only return a wrong entity: saving it back would clear
+     * the foreign key or the collection's rows. Many cached entities typically point to the same
+     * uncached ones (every Pet to its Owner), so each type is read in one query for the whole
+     * call, and each row once. Targets found nowhere, or not in Redis on an instance without a
      * database, are left out.
      */
-    private List<Object> findRelated(Class<?> type, List<?> rawIds, Map<String, Object> inProgress,
-                                     Map<String, Object> loaded) {
-        Object[] found = new Object[rawIds.size()];
-        List<Integer> missing = new ArrayList<>();
-        for (int i = 0; i < rawIds.size(); i++) {
-            String key = type.getSimpleName() + ":" + rawIds.get(i);
-            Object cached = find(key, type, inProgress, loaded);
-            if (cached != null) {
-                found[i] = cached;
-            } else if (loaded.containsKey(key)) {
-                found[i] = loaded.get(key);
-            } else {
-                missing.add(i);
+    private void resolvePending(List<PendingRelation> pending) {
+        if (pending.isEmpty()) {
+            return;
+        }
+        // Type → key → id, for the targets missing from Redis.
+        Map<Class<?>, Map<String, Object>> missing = new LinkedHashMap<>();
+        for (PendingRelation relation : pending) {
+            for (int i = 0; i < relation.targets().length; i++) {
+                if (relation.targets()[i] == null) {
+                    missing.computeIfAbsent(relation.type(), t -> new LinkedHashMap<>())
+                            .putIfAbsent(relation.key(i), relation.ids()[i]);
+                }
             }
         }
         if (!missing.isEmpty() && SessionManager.isInitialized()) {
-            Field idField = getIdField(type);
-            List<Object> ids = new ArrayList<>(missing.size());
-            for (int i : missing) {
-                Object rawId = rawIds.get(i);
-                ids.add(idField == null ? rawId : objectMapper.convertValue(rawId, idField.getType()));
-            }
-            List<?> rows;
+            // Key → row, null for no row.
+            Map<String, Object> loaded = new HashMap<>();
             try (Session session = SessionManager.get().getSession()) {
                 session.setDefaultReadOnly(true);
-                // Same order as the ids, null for a missing row.
-                rows = session.findMultiple(type, ids);
+                for (Map.Entry<Class<?>, Map<String, Object>> entry : missing.entrySet()) {
+                    List<String> keys = new ArrayList<>(entry.getValue().keySet());
+                    // Same order as the ids, null for a missing row.
+                    List<?> rows = session.findMultiple(entry.getKey(), new ArrayList<>(entry.getValue().values()));
+                    for (int k = 0; k < keys.size(); k++) {
+                        Object row = rows.get(k);
+                        if (row != null) {
+                            initializeCollections(row);
+                        }
+                        loaded.put(keys.get(k), row);
+                    }
+                }
             } catch (RuntimeException e) {
-                throw new RelatedLoadException("Failed to load " + type.getSimpleName() + " " + ids
-                        + " from the database: " + e.getMessage(), e);
+                throw new RuntimeException("Failed to load related "
+                        + missing.keySet().stream().map(Class::getSimpleName).toList()
+                        + " entities from the database: " + e.getMessage(), e);
             }
-            for (int k = 0; k < missing.size(); k++) {
-                int i = missing.get(k);
-                found[i] = rows.get(k);
-                loaded.put(type.getSimpleName() + ":" + rawIds.get(i), rows.get(k));
-            }
-        }
-        List<Object> result = new ArrayList<>(found.length);
-        for (Object entity : found) {
-            if (entity != null) {
-                result.add(entity);
+            for (PendingRelation relation : pending) {
+                for (int i = 0; i < relation.targets().length; i++) {
+                    if (relation.targets()[i] == null) {
+                        relation.targets()[i] = loaded.get(relation.key(i));
+                    }
+                }
             }
         }
-        return result;
+        try {
+            for (PendingRelation relation : pending) {
+                if (relation.collection() == null) {
+                    relation.assign();
+                }
+            }
+            for (PendingRelation relation : pending) {
+                if (relation.collection() != null) {
+                    relation.assign();
+                }
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot set a relation of a cached entity", e);
+        }
     }
 
     private <T> T reconstructEntity(Map<String, Object> rawData, Class<T> type,
                                     String fullKey, Map<String, Object> inProgress,
-                                    Map<String, Object> loaded) {
+                                    List<PendingRelation> pending) {
         try {
             T entity = type.getDeclaredConstructor().newInstance();
             inProgress.put(fullKey, entity);
@@ -472,33 +598,76 @@ public class RedisManager {
                 } else if (field.isAnnotationPresent(ManyToOne.class) || field.isAnnotationPresent(OneToOne.class)) {
                     Object idValue = rawData.get(fieldName + "_id");
                     if (idValue != null) {
-                        List<Object> related = findRelated(field.getType(), List.of(idValue), inProgress, loaded);
-                        field.set(entity, related.isEmpty() ? null : related.get(0));
+                        relate(entity, field, field.getType(), List.of(idValue), null, inProgress, pending);
                     }
                 } else if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)) {
                     List<?> ids = (List<?>) rawData.get(fieldName + "_ids");
                     if (ids != null && !ids.isEmpty()) {
-                        Collection<Object> relatedEntities;
-                        if (List.class.isAssignableFrom(field.getType())) {
-                            relatedEntities = new ArrayList<>();
-                        } else {
-                            relatedEntities = new HashSet<>();
-                        }
-
                         Class<?> genericType = getGenericType(field);
                         if (genericType != null) {
-                            relatedEntities.addAll(findRelated(genericType, ids, inProgress, loaded));
-                            field.set(entity, relatedEntities);
+                            relate(entity, field, genericType, ids, newCollection(field, genericType),
+                                    inProgress, pending);
                         }
                     }
                 }
             }
             return entity;
-        } catch (RelatedLoadException e) {
-            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to reconstruct entity of type " + type.getSimpleName() + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Loads the lazy collections of an entity read from the database while its session is open,
+     * like a repository's own database reads do: saving it to Redis later reads them.
+     */
+    private void initializeCollections(Object entity) {
+        try {
+            for (Field field : getCachedFields(entity.getClass()).values()) {
+                if (field.isAnnotationPresent(OneToMany.class) || field.isAnnotationPresent(ManyToMany.class)
+                        || field.isAnnotationPresent(ElementCollection.class)) {
+                    Object value = field.get(entity);
+                    if (value != null && !Hibernate.isInitialized(value)) {
+                        Hibernate.initialize(value);
+                    }
+                }
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot read the collections of " + entity.getClass().getSimpleName(), e);
+        }
+    }
+
+    /**
+     * An empty collection the field can hold, sorted like Hibernate sorts it. Checked while the
+     * entity is rebuilt, so that a field it cannot fill fails this entity only, not the whole
+     * {@link #findAll}: the elements are added once every entity is rebuilt.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Collection<Object> newCollection(Field field, Class<?> elementType) {
+        Class<?> type = field.getType();
+        if (type.isAssignableFrom(ArrayList.class)) {
+            return new ArrayList<>();
+        }
+        // Linked: keeps the order the ids were cached in.
+        if (type.isAssignableFrom(LinkedHashSet.class)) {
+            return new LinkedHashSet<>();
+        }
+        if (type.isAssignableFrom(TreeSet.class)) {
+            SortComparator sortComparator = field.getAnnotation(SortComparator.class);
+            if (sortComparator != null) {
+                try {
+                    return new TreeSet<>((Comparator) sortComparator.value().getDeclaredConstructor().newInstance());
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException("Cannot create the comparator of " + field.getName(), e);
+                }
+            }
+            if (!Comparable.class.isAssignableFrom(elementType)) {
+                throw new IllegalStateException(field.getName() + " is sorted, but " + elementType.getSimpleName()
+                        + " is not Comparable and no @SortComparator is set");
+            }
+            return new TreeSet<>();
+        }
+        throw new IllegalStateException("Unsupported collection type " + type.getName() + " for " + field.getName());
     }
 
     private Class<?> getGenericType(Field field) {
@@ -582,25 +751,40 @@ public class RedisManager {
     }
 
     public void shutdown() {
+        // Async calls still queued or running write to Redis: let them finish first.
+        asyncExecutor.shutdown();
+        try {
+            if (!asyncExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                asyncExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            asyncExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         isAlive = false;
         // Unblocks each subscriber's blocking subscribe() so its thread can exit; otherwise
         // shutdown waits the full 5 s below and the subscriber thread outlives the manager.
         for (EntityChannelPubSub<?> subscriber : subscriptions.values()) {
             subscriber.unsubscribe();
         }
-        if (redisQueueActionPool != null) {
-            redisQueueActionPool.shutdown();
-        }
-        pubSubExecutor.shutdown();
         try {
-            if (!pubSubExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                pubSubExecutor.shutdownNow();
+            if (redisQueueActionPool != null) {
+                redisQueueActionPool.shutdown();
             }
-        } catch (InterruptedException e) {
-            pubSubExecutor.shutdownNow();
-            Thread.currentThread().interrupt();
+        } finally {
+            // Even if the final flush threw: the subscriber threads and connections go anyway.
+            pubSubExecutor.shutdown();
+            try {
+                if (!pubSubExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    pubSubExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                pubSubExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            } finally {
+                client.close();
+            }
         }
-        client.close();
     }
 
     public ObjectMapper getObjectMapper() {

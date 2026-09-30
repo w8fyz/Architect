@@ -3,6 +3,7 @@ package sh.fyz.architect.repositories;
 import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.cache.RedisManager;
+import sh.fyz.architect.cache.RedisQueueActionPool;
 
 import jakarta.persistence.ElementCollection;
 import jakarta.persistence.ManyToMany;
@@ -20,6 +21,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -39,9 +41,18 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, List<RelationField>> RELATION_FIELDS_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, List<Field>> COLLECTION_FIELDS_CACHE = new ConcurrentHashMap<>();
-    // How many flushes (200 ms apart) retry a write refused by a foreign-key or unique constraint
-    // before dropping it: another queued write may be what it is waiting for.
+    // How many flushes (200 ms apart) retry a write refused by a foreign-key or unique constraint,
+    // or failing for another reason than the database's unavailability, before dropping it:
+    // another queued write may be what it is waiting for.
     private static final int MAX_CONSTRAINT_RETRIES = 25;
+    // While the database is unavailable every flush (200 ms apart) fails the same way: reported
+    // at most this often per repository.
+    private static final long FAILURE_REPORT_INTERVAL_MS = 30_000;
+
+    // Every live cached repository, held weakly: Architect.start() attaches those created before
+    // a stop() to the new Redis manager (see attachAll).
+    private static final Set<GenericCachedRepository<?>> INSTANCES =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
 
     /** A relation-annotated field, with what resolving it needs precomputed. */
     private record RelationField(Field field, boolean oneToMany, Class<?> elementType, String repositoryName) {}
@@ -54,19 +65,163 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private final ReentrantLock flushLock = new ReentrantLock();
     /** Constraint rejections per queued action, guarded by {@link #flushLock}. */
     private final IdentityHashMap<DatabaseAction<T>, Integer> constraintRejections = new IdentityHashMap<>();
+    /** Failed flushes not reported yet, and when the last was; guarded by {@link #flushLock}. */
+    private int unreportedFailures;
+    private long lastFailureReport;
+    private boolean failing;
+    /** Writes taken from the queues by the flush in progress; written under {@link #flushLock}. */
+    private volatile int inFlight;
     private final String cacheKeyPrefix;
     private final String allEntitiesKey;
+    /** The flush pool this repository is registered with; each Redis manager has its own. */
+    private final AtomicReference<RedisQueueActionPool> registeredPool = new AtomicReference<>();
 
     public GenericCachedRepository(Class<T> type) {
         super(type);
         this.type = type;
         this.cacheKeyPrefix = type.getSimpleName() + ":";
         this.allEntitiesKey = cacheKeyPrefix + "*";
-        RedisManager.get().getRedisQueueActionPool().add(this);
+        attach();
+        INSTANCES.add(this);
+    }
+
+    /**
+     * Prepares the live cached repositories for the current Redis manager (see
+     * {@link #onRestart}). Called by {@code Architect.start()}: a repository kept across
+     * {@code stop()} / {@code start()} would otherwise queue writes that no flush worker applies.
+     */
+    public static void attachAll() {
+        List<GenericCachedRepository<?>> live;
+        synchronized (INSTANCES) {
+            live = new ArrayList<>(INSTANCES);
+        }
+        for (GenericCachedRepository<?> repository : live) {
+            // Its entity is not managed by the database this start() connected to.
+            if (sh.fyz.architect.persistent.SessionManager.isInitialized()
+                    && sh.fyz.architect.persistent.SessionManager.get()
+                            .getEntityClass(repository.type.getSimpleName()) != repository.type) {
+                continue;
+            }
+            try {
+                repository.onRestart();
+            } catch (RuntimeException e) {
+                LOG.warning("Failed to attach the cached repository of " + repository.type.getSimpleName()
+                        + " to Redis, or to load its cache: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * For a repository created before a restart. Only one with writes still queued attaches at
+     * once, since they must be flushed; the others attach on their next call. The flush pool keeps
+     * an attached repository for the whole run: attaching every live one would also keep, run
+     * after run, those the application dropped but the garbage collector has not reclaimed yet.
+     */
+    protected void onRestart() {
+        if (pendingWriteCount() > 0) {
+            attach();
+        }
+    }
+
+    /**
+     * Registers with the current Redis manager's flush pool and loads the cache, once per manager;
+     * every call of this repository does it first. Writes still queued from before a restart are
+     * then cached again, or Redis would serve the rows' older state until the next save overwrote
+     * them. The flush lock is held throughout: the pool's worker, already running, could
+     * otherwise commit a queued write between the database read and the recache, which would then
+     * find nothing to put back over the older state just cached.
+     */
+    protected void attach() {
+        RedisQueueActionPool pool = RedisManager.get().getRedisQueueActionPool();
+        if (pool == null) {
+            throw new IllegalStateException("Redis is still starting");
+        }
+        if (registeredPool.get() == pool) {
+            return;
+        }
+        flushLock.lock();
+        try {
+            if (registeredPool.get() == pool) {
+                return;
+            }
+            pool.add(this);
+            try {
+                // Without a database there is nothing to load.
+                if (sh.fyz.architect.persistent.SessionManager.isInitialized()) {
+                    loadCache(pool);
+                }
+            } finally {
+                // Even if loading failed: part of the cache may hold older states.
+                recachePendingWrites();
+            }
+            // Only once loaded: a failed load (database not started yet) is retried by the next call.
+            registeredPool.set(pool);
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    /**
+     * Loads the cache from the database. The receiver loads the whole table once per Redis
+     * manager and entity type, whatever the cache already holds: its start cleared Redis, and a
+     * few entities cached since by another instance are not the whole table, which all() and
+     * query() take the cache for. Other instances only fill an empty cache: reloading a warm
+     * one at each start would cost a full table read, and could cache again a row another
+     * instance deletes meanwhile. Rows already cached are kept (SET NX) either way: a state
+     * cached meanwhile (a relayed save, another repository's write) may be newer.
+     */
+    private void loadCache(RedisQueueActionPool pool) {
+        if (!RedisManager.get().isReceiver()) {
+            loadAll();
+            return;
+        }
+        if (!pool.claimCacheLoad(type)) {
+            return;
+        }
+        try {
+            cacheRows(super.all());
+        } catch (RuntimeException e) {
+            // Retried by the next call of a repository of this type.
+            pool.releaseCacheLoad(type);
+            throw e;
+        }
+    }
+
+    /**
+     * Applies the queued writes to Redis, in order; the flush worker applies them to the
+     * database. Called with {@link #flushLock} held.
+     */
+    private void recachePendingWrites() {
+        for (Iterator<DatabaseAction<T>> it = pendingWrites(); it.hasNext(); ) {
+            DatabaseAction<T> action = it.next();
+            Object id = action.getEntity().getId();
+            if (id == null) {
+                continue;
+            }
+            switch (action.getType()) {
+                case SAVE -> RedisManager.get().save(cacheKeyPrefix + id, action.getEntity());
+                case DELETE -> evictFromCache(id);
+                default -> { }
+            }
+        }
+    }
+
+    /** The writes not applied to the database yet, oldest first. */
+    private Iterator<DatabaseAction<T>> pendingWrites() {
+        return Stream.concat(retryQueue.stream(), updateQueue.stream()).iterator();
+    }
+
+    /**
+     * How many writes are not applied to the database yet, those of a flush in progress included.
+     * Exact once the flushes have stopped; while one runs, an instant's approximation.
+     */
+    public int pendingWriteCount() {
+        return retryQueue.size() + updateQueue.size() + inFlight;
     }
 
     @Override
     public T save(T entity) {
+        attach();
         if (entity.getId() == null) {
             if (RedisManager.get().isReceiver()) {
                 entity = super.save(entity);
@@ -89,6 +244,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public T findById(Object id) {
+        attach();
         String key = cacheKeyPrefix + id;
         T cachedEntity = RedisManager.get().find(key, type);
         if (cachedEntity != null) {
@@ -96,7 +252,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
         T dbEntity = super.findById(id);
         if (dbEntity != null) {
-            RedisManager.get().save(key, dbEntity);
+            // Unless a state was cached meanwhile, which may be newer than this read.
+            RedisManager.get().saveIfAbsent(key, dbEntity);
             return dbEntity;
         }
         return null;
@@ -104,6 +261,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public void delete(T entity) {
+        attach();
         evictFromCache(entity.getId());
         if (RedisManager.get().isReceiver()) {
             updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
@@ -131,8 +289,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     }
 
     /**
-     * Serialized so that the flush worker and a caller (see {@link #executeDelete}) never
-     * commit two batches of the same queue concurrently, possibly out of order.
+     * Serialized so that the flush worker and a caller never commit two batches of the same
+     * queue concurrently, possibly out of order ({@link #executeDelete} holds the lock too).
      */
     public void flushUpdates() {
         flushLock.lock();
@@ -144,6 +302,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     }
 
     private void flushPending() {
+        // No database (yet, or any more): the writes wait for one instead of failing, which
+        // would count as attempts and eventually drop them.
+        if (!sh.fyz.architect.persistent.SessionManager.isInitialized()) {
+            return;
+        }
         List<DatabaseAction<T>> batch = new ArrayList<>();
         DatabaseAction<T> retry;
         while ((retry = retryQueue.pollFirst()) != null) {
@@ -154,6 +317,16 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             batch.add(action);
         }
         if (batch.isEmpty()) return;
+        inFlight = batch.size();
+        try {
+            flushBatch(batch);
+        } finally {
+            // Failed writes are back in retryQueue by now.
+            inFlight = 0;
+        }
+    }
+
+    private void flushBatch(List<DatabaseAction<T>> batch) {
 
         try {
             applyInTransaction(batch);
@@ -169,12 +342,36 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
             for (int i = batch.size() - 1; i >= 0; i--) {
                 retryQueue.addFirst(batch.get(i));
             }
-            LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+            reportFailure(e);
             return;
         }
         for (int i = 0; i < batch.size(); i++) {
             constraintRejections.remove(batch.get(i));
             evictCommittedDelete(batch, i);
+        }
+        reportRecovery();
+    }
+
+    /** Logs a failed flush that will be retried, at most every {@link #FAILURE_REPORT_INTERVAL_MS}. */
+    private void reportFailure(Exception e) {
+        failing = true;
+        unreportedFailures++;
+        long now = System.currentTimeMillis();
+        if (now - lastFailureReport >= FAILURE_REPORT_INTERVAL_MS) {
+            LOG.warning("Failed to flush updates for " + type.getSimpleName() + " (" + unreportedFailures
+                    + " attempt(s) since the last report, retrying): " + e.getMessage());
+            lastFailureReport = now;
+            unreportedFailures = 0;
+        }
+    }
+
+    /** Logs that flushes succeed again after failures, so that the next failure is reported at once. */
+    private void reportRecovery() {
+        if (failing) {
+            LOG.info("Flushing updates for " + type.getSimpleName() + " works again");
+            failing = false;
+            unreportedFailures = 0;
+            lastFailureReport = 0;
         }
     }
 
@@ -197,10 +394,10 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 boolean retry = rejection == Rejection.RETRYABLE
                         && constraintRejections.merge(item, 1, Integer::sum) <= MAX_CONSTRAINT_RETRIES;
                 if (rejection != null && !retry) {
-                    // Retrying cannot succeed (any more): the same state would be refused again.
+                    // Retrying cannot succeed (any more): the same write would fail again.
                     constraintRejections.remove(item);
                     LOG.severe("Dropped " + item.getType() + " of " + type.getSimpleName() + " "
-                            + item.getEntity().getId() + ", rejected by the database: " + e.getMessage());
+                            + item.getEntity().getId() + ", which could not be applied: " + e.getMessage());
                     refreshDropped(item, batch, i);
                     continue;
                 }
@@ -209,10 +406,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 for (int j = batch.size() - 1; j >= i; j--) {
                     retryQueue.addFirst(batch.get(j));
                 }
-                LOG.warning("Failed to flush updates for " + type.getSimpleName() + ": " + e.getMessage());
+                reportFailure(e);
                 return;
             }
         }
+        reportRecovery();
     }
 
     /**
@@ -332,16 +530,24 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private enum Rejection {
         /** Refused for the entity's own state: replaying it fails the same way. */
         PERMANENT,
-        /** Refused against other rows (foreign key, unique): may pass once other writes commit. */
+        /**
+         * Refused against other rows (foreign key, unique, a related entity with no row), or for
+         * a reason not known to be the database's unavailability: may pass once other writes
+         * commit, and is dropped after {@link #MAX_CONSTRAINT_RETRIES} attempts otherwise.
+         */
         RETRYABLE
     }
 
     /**
-     * Whether the database refused the entity's state (constraint violation, value out of range
-     * or too long, missing non-null property), unlike a lost connection or a lock timeout; null
-     * for any other failure.
+     * How the write was refused, or null when the database could not process it at all (see
+     * {@link #isUnavailable}): such a write is fine and waits for the database, however long
+     * that takes. Any other failure is bounded, or one write would block every later write of
+     * this type (and {@link #executeDelete}) for good.
      */
     private static Rejection rejection(Throwable e) {
+        if (isUnavailable(e)) {
+            return null;
+        }
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t instanceof org.hibernate.exception.ConstraintViolationException cve) {
                 return switch (cve.getKind()) {
@@ -356,7 +562,49 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
                 return Rejection.PERMANENT;
             }
         }
-        return null;
+        // Foreign keys and unique keys, but also a relation pointing to a row deleted meanwhile
+        // (EntityNotFoundException) or to an entity no longer persistent: the other rows may
+        // still change, so the write gets a few more attempts.
+        return Rejection.RETRYABLE;
+    }
+
+    /**
+     * Whether the database could not process the write at all: connection lost or refused,
+     * lock or statement timeout, deadlock or serialization failure, server overloaded, shutting
+     * down or read-only (a failover in progress). Recognized by exception type and by standard
+     * SQLSTATE class (08, 25, 40, 53, 57, 58, HYT), for the drivers and dialects Hibernate does
+     * not map to a specific type; MySQL and MariaDB report a read-only server with vendor codes
+     * only.
+     */
+    private static boolean isUnavailable(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof org.hibernate.exception.JDBCConnectionException
+                    || t instanceof org.hibernate.exception.LockAcquisitionException
+                    || t instanceof org.hibernate.PessimisticLockException
+                    || t instanceof org.hibernate.QueryTimeoutException
+                    || t instanceof jakarta.persistence.PessimisticLockException
+                    || t instanceof jakarta.persistence.LockTimeoutException
+                    || t instanceof jakarta.persistence.QueryTimeoutException
+                    || t instanceof java.sql.SQLTransientException
+                    || t instanceof java.sql.SQLRecoverableException) {
+                return true;
+            }
+            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                String state = sql.getSQLState();
+                if (state.startsWith("08") || state.startsWith("25") || state.startsWith("40")
+                        || state.startsWith("53") || state.startsWith("57") || state.startsWith("58")
+                        || state.startsWith("HYT")) {
+                    return true;
+                }
+            }
+            // ER_OPTION_PREVENTS_STATEMENT (--read-only, --super-read-only) and ER_READ_ONLY_MODE,
+            // both with SQLSTATE HY000.
+            if (t instanceof java.sql.SQLException sql && "HY000".equals(sql.getSQLState())
+                    && (sql.getErrorCode() == 1290 || sql.getErrorCode() == 1836)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether the failure is an optimistic-lock one: the entity's row was deleted or changed meanwhile. */
@@ -372,6 +620,12 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     public List<T> all() {
+        attach();
+        return loadAll();
+    }
+
+    /** The whole table: from the cache, or from the database into the cache if it is empty. */
+    private List<T> loadAll() {
         List<T> entities = getAllFromCache();
 
         if (entities != null && !entities.isEmpty()) {
@@ -387,13 +641,20 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
         entities = super.all();
         if (entities != null && !entities.isEmpty()) {
-            for (T entity : entities) {
-                RedisManager.get().save(cacheKeyPrefix + entity.getId(), entity);
-            }
+            cacheRows(entities);
             return entities;
         } else {
             return new ArrayList<>();
         }
+    }
+
+    /** Caches rows read from the database, keeping any state cached meanwhile (see {@link #loadCache}). */
+    private void cacheRows(List<T> rows) {
+        Map<String, T> byKey = new LinkedHashMap<>();
+        for (T row : rows) {
+            byKey.put(cacheKeyPrefix + row.getId(), row);
+        }
+        RedisManager.get().saveAllIfAbsent(byKey);
     }
 
     /**
@@ -438,7 +699,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
-        validateQueryFields(builder);
+        attach();
         if (builder.hasRawConditions()) {
             return super.executeQueryWithLimit(builder, explicitLimit);
         }
@@ -471,7 +732,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         if (dbResults != null) {
             for (T entity : dbResults) {
                 if (entity instanceof IdentifiableEntity ie && ie.getId() != null) {
-                    RedisManager.get().save(cacheKeyPrefix + ie.getId(), entity);
+                    RedisManager.get().saveIfAbsent(cacheKeyPrefix + ie.getId(), entity);
                 }
             }
         }
@@ -480,7 +741,7 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected long executeCount(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
+        attach();
         if (builder.hasRawConditions()) {
             return super.executeCount(builder);
         }
@@ -501,13 +762,32 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     @Override
     protected int executeDelete(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
-        if (RedisManager.get().isReceiver()) {
+        attach();
+        if (!RedisManager.get().isReceiver()) {
+            return deleteMatching(builder);
+        }
+        // Held throughout, so the flush worker cannot commit queued writes between the flush
+        // below and the delete.
+        flushLock.lock();
+        try {
             // The delete runs against the database, but rows are matched on the cache, which
             // already holds the queued writes: apply them first, or the delete misses rows the
             // cache matched and a queued write then brings a deleted row back.
-            flushUpdates();
+            flushPending();
+            if (!retryQueue.isEmpty()) {
+                // Writes the database did not take yet (connection lost, constraint waiting for
+                // another write): deleting now would test the conditions against rows they are
+                // about to change, and the retried writes could bring deleted rows back.
+                throw new IllegalStateException("Cannot delete " + type.getSimpleName() + " rows while "
+                        + retryQueue.size() + " queued write(s) wait to be retried; try again later");
+            }
+            return deleteMatching(builder);
+        } finally {
+            flushLock.unlock();
         }
+    }
+
+    private int deleteMatching(QueryBuilder<T> builder) {
         List<Object> matchedIds = new ArrayList<>();
         if (builder.hasRawConditions()) {
             // Raw HQL cannot be evaluated in memory, and evicting on the other conditions alone
@@ -809,8 +1089,8 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         ConcurrentHashMap<String, Field> fields = FIELD_LOOKUP_CACHE.computeIfAbsent(clazz, c -> new ConcurrentHashMap<>());
         Field field = fields.get(fieldName);
         if (field == null) {
-            // Misses are not cached: field names reach here unvalidated, so caching them would
-            // let arbitrary names grow the map without bound.
+            // Misses are not cached, so that names absent from the class cannot grow the map
+            // without bound.
             field = lookupField(clazz, fieldName);
             if (field != null) {
                 fields.putIfAbsent(fieldName, field);

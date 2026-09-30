@@ -9,7 +9,6 @@ import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -132,66 +131,9 @@ public class MigrationManager {
 
     private void doClearDatabase() {
         try (Session session = SessionManager.get().getSession()) {
-            session.doWork(this::doClear);
+            session.doWork(connection -> SqlDialect.dropAll(connection, dialect));
         }
         LOG.info("Database cleared successfully");
-    }
-
-    private void doClear(Connection connection) throws SQLException {
-        boolean wasAutoCommit = connection.getAutoCommit();
-        try {
-            connection.setAutoCommit(false);
-            String dialectLower = dialect.toLowerCase();
-            try (Statement stmt = connection.createStatement()) {
-                if (dialectLower.contains("postgresql")) {
-                    stmt.execute("DROP SCHEMA public CASCADE");
-                    stmt.execute("CREATE SCHEMA public");
-                } else if (dialectLower.contains("mysql") || dialectLower.contains("mariadb")) {
-                    stmt.execute("SET FOREIGN_KEY_CHECKS = 0");
-                    try {
-                        List<String> tables = getTableNamesViaJdbc(connection);
-                        for (String table : tables) {
-                            stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
-                        }
-                    } finally {
-                        // A session variable: the pool does not reset it, and the next borrower
-                        // of this connection would run without foreign-key enforcement.
-                        stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
-                    }
-                } else if (dialectLower.contains("h2")) {
-                    stmt.execute("DROP ALL OBJECTS");
-                } else if (dialectLower.contains("sqlite")) {
-                    // SQLite's DROP TABLE has no CASCADE.
-                    List<String> tables = getTableNamesViaJdbc(connection);
-                    for (String table : tables) {
-                        stmt.execute("DROP TABLE IF EXISTS \"" + table + "\"");
-                    }
-                } else {
-                    List<String> tables = getTableNamesViaJdbc(connection);
-                    for (String table : tables) {
-                        stmt.execute("DROP TABLE IF EXISTS \"" + table + "\" CASCADE");
-                    }
-                }
-            }
-            connection.commit();
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(wasAutoCommit);
-        }
-    }
-
-    private List<String> getTableNamesViaJdbc(Connection connection) throws SQLException {
-        List<String> tables = new ArrayList<>();
-        var meta = connection.getMetaData();
-        String schema = dialect.toLowerCase().contains("postgresql") ? "public" : null;
-        try (var rs = meta.getTables(null, schema, null, new String[]{"TABLE"})) {
-            while (rs.next()) {
-                tables.add(rs.getString("TABLE_NAME"));
-            }
-        }
-        return tables;
     }
 
     public List<String> listMigrations() {

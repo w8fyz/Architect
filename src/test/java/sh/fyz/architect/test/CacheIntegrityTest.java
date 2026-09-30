@@ -22,9 +22,14 @@ import sh.fyz.architect.relationmodel.Pet;
 import sh.fyz.architect.repositories.GenericCachedRepository;
 import sh.fyz.architect.repositories.GenericRelayRepository;
 import sh.fyz.architect.repositories.GenericRepository;
+import sh.fyz.architect.setmodel.Animal;
+import sh.fyz.architect.setmodel.Keeper;
+import sh.fyz.architect.setmodel.Vet;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -65,6 +70,9 @@ public class CacheIntegrityTest {
         architect.addEntityClass(Pet.class);
         architect.addEntityClass(Team.class);
         architect.addEntityClass(Member.class);
+        architect.addEntityClass(Keeper.class);
+        architect.addEntityClass(Animal.class);
+        architect.addEntityClass(Vet.class);
         architect.start();
 
         cached = new GenericCachedRepository<>(Gadget.class);
@@ -194,6 +202,36 @@ public class CacheIntegrityTest {
         db.save(new Gadget("a", "x", 1, Gadget.Kind.SMALL));
         assertTrue(db.query().limit(0).findAll().isEmpty());
         assertTrue(cached.query().limit(0).findAll().isEmpty());
+        assertNull(db.query().limit(0).findFirst());
+        assertNull(cached.query().limit(0).findFirst());
+    }
+
+    @Test
+    @DisplayName("query().delete() refuse tant qu'une ecriture attend d'etre retentee")
+    void testQueryDeleteWaitsForRetriedWrites() throws Exception {
+        GenericRepository<Owner> owners = new GenericRepository<>(Owner.class);
+        Owner owner = owners.save(new Owner("Kept"));
+        Owner gone = owners.save(new Owner("Gone"));
+        Pet pet = new GenericRepository<>(Pet.class).save(new Pet("Orphan", owner));
+        owners.delete(gone);
+
+        TestFlushedRepository<Pet> pets = new TestFlushedRepository<>(Pet.class);
+        Pet copy = pets.findById(pet.getId());
+        Field ownerField = Pet.class.getDeclaredField("owner");
+        ownerField.setAccessible(true);
+        ownerField.set(copy, gone); // its row no longer exists
+        pets.save(copy);
+        pets.flushUpdates();
+
+        assertThrows(IllegalStateException.class, () -> pets.query().where("name", "Orphan").delete());
+
+        // Retried a bounded number of times, then dropped: the queue must not stay blocked.
+        for (int i = 0; i < 30; i++) {
+            pets.flushUpdates();
+        }
+        assertEquals(owner.getId(), pets.findById(pet.getId()).getOwner().getId(),
+                "the cache gets the row's state back");
+        assertEquals(1, pets.query().where("name", "Orphan").delete());
     }
 
     @Test
@@ -228,6 +266,31 @@ public class CacheIntegrityTest {
         Owner fromCacheOwner = cachedOwners.findById(owner.getId());
         assertEquals(1, fromCacheOwner.getPets().size());
         assertEquals("Rex II", fromCacheOwner.getPets().iterator().next().getName());
+    }
+
+    @Test
+    @DisplayName("Set rebati du cache : chaque element y est retrouve, quel que soit le point d'entree")
+    void testCachedSetElementsAreFound() {
+        // Animal.hashCode depends on its vet, which is not cached: read from the database last.
+        Vet vet = new GenericRepository<>(Vet.class).save(new Vet(UUID.randomUUID(), "Doc"));
+        Keeper keeper = new GenericRepository<>(Keeper.class).save(new Keeper("Kim"));
+        GenericRepository<Animal> animalRows = new GenericRepository<>(Animal.class);
+        Animal rex = animalRows.save(new Animal("Rex", keeper, vet));
+        animalRows.save(new Animal("Tom", keeper, vet));
+
+        GenericCachedRepository<Keeper> keepers = new GenericCachedRepository<>(Keeper.class);
+        GenericCachedRepository<Animal> animals = new GenericCachedRepository<>(Animal.class);
+        assertTrue(inRedis("Keeper:" + keeper.getId()) && inRedis("Animal:" + rex.getId()));
+        assertFalse(inRedis("Vet:" + vet.getId()));
+
+        Set<Animal> fromKeeper = keepers.findById(keeper.getId()).getAnimals();
+        assertEquals(2, fromKeeper.size());
+        for (Animal animal : fromKeeper) {
+            assertTrue(fromKeeper.contains(animal));
+        }
+        // Entered from an element: it is still being rebuilt when its keeper's set is filled.
+        Animal fromAnimal = animals.findById(rex.getId());
+        assertTrue(fromAnimal.getKeeper().getAnimals().contains(fromAnimal));
     }
 
     @Test

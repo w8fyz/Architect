@@ -8,7 +8,7 @@ public class MariaDBAuth extends SQLAuthProvider {
     private final String hostname;
     private final String database;
     private final int port;
-    private TlsMode tlsMode = TlsMode.DISABLE;
+    private TlsMode tlsMode = TlsMode.DRIVER_DEFAULT;
 
     public MariaDBAuth(String hostname, int port, String database) {
         validateHost(hostname);
@@ -43,14 +43,16 @@ public class MariaDBAuth extends SQLAuthProvider {
 
     /**
      * The legacy options, which Connector/J 2.x and 3.x read the same way (3.x maps them to
-     * {@code sslMode} trust / verify-ca / verify-full, logging a deprecation notice). Mixing
+     * {@code sslMode} trust / verify-ca / verify-full, logging a deprecation notice; with
+     * {@code useSsl=false} it keeps its default, {@code disable}). Mixing
      * them with {@code sslMode} does not work: 3.x lets {@code useSsl} override an explicit
      * {@code sslMode} with verify-full, and 2.x ignores {@code sslMode} altogether.
      * MariaDB has no opportunistic mode, so PREFER requires TLS like REQUIRE.
      */
     private String tlsParams() {
         return switch (tlsMode) {
-            case DISABLE -> "";
+            case DRIVER_DEFAULT -> "";
+            case DISABLE -> "?useSsl=false";
             case PREFER, REQUIRE -> "?useSsl=true&trustServerCertificate=true";
             case VERIFY_CA -> "?useSsl=true&disableSslHostnameVerification=true";
             case VERIFY_FULL -> "?useSsl=true";

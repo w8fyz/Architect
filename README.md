@@ -136,12 +136,11 @@ new PostgreSQLAuth("db.example.com", 5432, "app").withTls(TlsMode.REQUIRE)
 new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
 ```
 
-`TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters. Dialect notes:
+`TlsMode` values: `DRIVER_DEFAULT` (default), `DISABLE`, `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters. `DRIVER_DEFAULT` adds no parameter, so the driver decides: opportunistic TLS for PostgreSQL (`prefer`) and MySQL (`PREFERRED`), plaintext for MariaDB and H2. `DISABLE` forces plaintext everywhere. Dialect notes:
 
-- **PostgreSQL**: `DISABLE` adds no `sslmode` parameter, so the pgjdbc default (`prefer`) applies.
-- **MySQL**: `DISABLE` adds no TLS parameter either, so the Connector/J default (`PREFERRED`) applies.
+- **MySQL**: the legacy `useSSL` options are used, which Connector/J 8.0+ maps to `sslMode` (Connector/J 5.1 reads them differently: it verifies the certificate whenever TLS is requested). With `DISABLE`, MySQL 8's default `caching_sha2_password` refuses a plaintext login ("Public Key Retrieval is not allowed") whenever the server has not cached the account's password yet, typically after a restart, unless the connection sets `serverRSAPublicKeyFile` or `allowPublicKeyRetrieval`, which `MySQLAuth` does not add (override its `getUrl()` if you need one).
 - **MariaDB**: the legacy `useSsl` options are used, which Connector/J 2.x and 3.x both understand (3.x logs a deprecation notice). There is no opportunistic mode, so `PREFER` requires TLS like `REQUIRE`.
-- **H2**: every mode other than `DISABLE` uses `jdbc:h2:ssl://`, which checks the certificate chain against the JVM truststore but not the hostname — `VERIFY_FULL` behaves like `VERIFY_CA`.
+- **H2**: every mode other than `DRIVER_DEFAULT` and `DISABLE` uses `jdbc:h2:ssl://`, which checks the certificate chain against the JVM truststore but not the hostname — `VERIFY_FULL` behaves like `VERIFY_CA`.
 
 ### DatabaseCredentials
 
@@ -195,6 +194,8 @@ users.allAsync(onSuccess, onError);
 users.deleteAsync(user, onSuccess, onError);
 ```
 
+`delete(entity)` does nothing when the entity's row is already gone (deleted elsewhere) or was never saved. A `@Version` entity whose version is behind its row's still fails with an optimistic-lock error.
+
 ### GenericCachedRepository
 
 Redis-first reads. Falls back to database on cache miss, then populates the cache. Writes are queued and flushed to the database periodically.
@@ -203,9 +204,11 @@ Redis-first reads. Falls back to database on cache miss, then populates the cach
 GenericCachedRepository<User> users = new GenericCachedRepository<>(User.class);
 ```
 
-Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache; on an instance with a database, related entities missing from Redis are read from it (one query per relation). Lazy collections are loaded when an entity is read from the database, before it is cached.
+Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache; on an instance with a database, related entities missing from Redis are read from it, in one query per entity type for the whole read. Lazy collections are loaded when an entity is read from the database, before it is cached. The cache is taken for the whole table by `all()` and `query()`: the receiver loads each table into it on the first use after its start (which clears Redis), keeping any row already cached since; other instances only load an empty cache, so a cache partly filled by another instance is trusted as is there.
 
-A queued write that the database rejects for the entity's own state (value too long, `NOT NULL`, `CHECK`) is dropped with a `SEVERE` log and the cache is refreshed from the database, so that it cannot block the writes queued after it; one refused by a foreign-key or unique constraint is retried for about 5 seconds first. `@Version` entities are last-writer-wins: a queued or relayed write takes the row's current version before it is merged.
+A queued write that the database rejects for the entity's own state (value too long, `NOT NULL`, `CHECK`) is dropped with a `SEVERE` log and the cache is refreshed from the database, so that it cannot block the writes queued after it; any other failure (foreign-key or unique constraint, related entity whose row no longer exists...) is retried for about 5 seconds first. Only when the database cannot process writes at all (connection lost, lock or statement timeout, deadlock, server overloaded or read-only during a failover) do queued writes wait for it indefinitely. `@Version` entities are last-writer-wins: a queued or relayed write takes the row's current version before it is merged. Writes land in Redis first and reach the database later, so concurrent updates overwrite each other before any version check could see them: cached and relay repositories offer no optimistic-lock protection. Use a plain `GenericRepository` where a concurrent update must be detected.
+
+On a receiver, `query()...delete()` first flushes the queued writes of the repository instance it is called on, since it matches rows on the cache but deletes them in the database. If some are still waiting to be retried (database unreachable, constraint waiting for another write), it throws `IllegalStateException` instead of deleting against rows the database does not have yet; call it again later.
 
 ### GenericRelayRepository
 
@@ -372,6 +375,7 @@ query().orderBy("category").orderBy("name")    // multi-column
 ```java
 query().limit(10)                   // first 10 results
 query().limit(10).offset(20)       // page 3 (10 per page)
+query().limit(0)                    // no row: findAll() returns an empty list, findFirst() null
 
 query()
     .where("active", true)
@@ -495,7 +499,9 @@ Always shut down Architect when your application stops:
 architect.stop();
 ```
 
-This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis.
+This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis. It first waits (up to 5 seconds) for async calls still running, then flushes the cached writes still queued, and only then closes the database.
+
+`stop()` followed by `start()` works: repositories created before the restart keep working, and cached and relay repositories attach to the new Redis connection (flush queue, pub/sub subscription) on their own.
 
 ## What's new in 2.2.0
 

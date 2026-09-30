@@ -138,6 +138,8 @@ public class GenericRepositoryTest {
 
         repository.delete(saved);
         assertNull(repository.findById(id));
+        // The row is already gone (deleted elsewhere, or a relayed delete received twice).
+        assertDoesNotThrow(() -> repository.delete(saved));
     }
 
     @Test

@@ -8,7 +8,7 @@ public class H2Auth extends SQLAuthProvider {
     private final String hostname;
     private final String database;
     private final int port;
-    private TlsMode tlsMode = TlsMode.DISABLE;
+    private TlsMode tlsMode = TlsMode.DRIVER_DEFAULT;
 
     public H2Auth(String hostname, int port, String database) {
         validateHost(hostname);
@@ -20,9 +20,10 @@ public class H2Auth extends SQLAuthProvider {
     }
 
     /**
-     * Any mode other than {@link TlsMode#DISABLE} selects H2's {@code ssl} transport, which
-     * verifies the certificate chain against the JVM truststore but not the hostname:
-     * {@link TlsMode#VERIFY_FULL} gives the same guarantees as {@link TlsMode#VERIFY_CA}.
+     * Any mode other than {@link TlsMode#DRIVER_DEFAULT} and {@link TlsMode#DISABLE} selects
+     * H2's {@code ssl} transport, which verifies the certificate chain against the JVM
+     * truststore but not the hostname: {@link TlsMode#VERIFY_FULL} gives the same guarantees as
+     * {@link TlsMode#VERIFY_CA}.
      */
     public H2Auth withTls(TlsMode mode) {
         if (mode == null) throw new IllegalArgumentException("TlsMode must not be null");
@@ -43,7 +44,7 @@ public class H2Auth extends SQLAuthProvider {
     @Override
     public String getUrl() {
         String scheme = switch (tlsMode) {
-            case DISABLE -> "tcp";
+            case DRIVER_DEFAULT, DISABLE -> "tcp";
             case PREFER, REQUIRE, VERIFY_CA, VERIFY_FULL -> "ssl";
         };
         return "jdbc:h2:" + scheme + "://" + hostname + ":" + port + "/" + database;

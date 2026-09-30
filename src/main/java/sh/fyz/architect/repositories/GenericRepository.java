@@ -2,6 +2,7 @@ package sh.fyz.architect.repositories;
 
 import jakarta.persistence.Id;
 import jakarta.persistence.Version;
+import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.persistent.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -29,8 +30,8 @@ public class GenericRepository<T> {
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
     // Optional because ConcurrentHashMap cannot hold null, and "no @Version field" must be cached too.
     private static final ConcurrentHashMap<Class<?>, Optional<Field>> VERSION_FIELD_CACHE = new ConcurrentHashMap<>();
-    // For async calls on an instance without a database (a relay-only non-receiver), which has no
-    // SessionManager thread pool. Virtual threads need no shutdown.
+    // For async calls on an instance with neither a database nor Redis, which then fail, but
+    // through their error callback. Virtual threads need no shutdown.
     private static final ExecutorService FALLBACK_THREAD_POOL = Executors.newVirtualThreadPerTaskExecutor();
 
     public GenericRepository(Class<T> type) {
@@ -45,11 +46,14 @@ public class GenericRepository<T> {
      * Resolves the current session thread pool on each call. This avoids keeping a
      * stale reference after {@code architect.stop()} / {@code start()}, which used to
      * throw {@link java.util.concurrent.RejectedExecutionException} on async operations.
-     * Without a database there is no session thread pool, and a shared virtual-thread
-     * executor is used instead.
+     * Without a database there is no session thread pool: Redis' executor is used instead
+     * (a relay-only non-receiver), which {@code stop()} also waits for.
      */
     protected ExecutorService threadPool() {
-        return SessionManager.isInitialized() ? SessionManager.get().getThreadPool() : FALLBACK_THREAD_POOL;
+        if (SessionManager.isInitialized()) {
+            return SessionManager.get().getThreadPool();
+        }
+        return RedisManager.isInitialized() ? RedisManager.get().getAsyncExecutor() : FALLBACK_THREAD_POOL;
     }
 
     // --- QUERY BUILDER ENTRY POINT ---
@@ -202,13 +206,24 @@ public class GenericRepository<T> {
         });
     }
 
+    /**
+     * Deletes the entity's row. An entity whose row no longer exists (deleted by another
+     * instance, or relayed twice), or that was never saved, has nothing to delete: that is not
+     * an error.
+     */
     public void delete(T entity) {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
-                beforeMerge(session, entity);
-                Object managed = session.merge(entity);
-                session.remove(managed);
+                // Looked up first: merging a detached entity whose row is gone throws an
+                // optimistic-lock exception, and merging one never saved would insert it.
+                Object id = session.getSessionFactory().getPersistenceUnitUtil().getIdentifier(entity);
+                if (id != null && session.find(type, id) != null) {
+                    beforeMerge(session, entity);
+                    // Merged onto the instance just loaded, which still checks a @Version.
+                    Object managed = session.merge(entity);
+                    session.remove(managed);
+                }
                 transaction.commit();
             } catch (Exception e) {
                 if (transaction.isActive()) {
@@ -255,8 +270,6 @@ public class GenericRepository<T> {
     }
 
     private List<T> select(QueryBuilder<T> builder, int limit, int offset, boolean prepare) {
-        validateQueryFields(builder);
-
         try (Session session = openReadOnlySession()) {
             String hql = buildSelectHql(builder);
             Query<T> query = session.createQuery(hql, type);
@@ -278,8 +291,6 @@ public class GenericRepository<T> {
     }
 
     protected long executeCount(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
-
         try (Session session = SessionManager.get().getSession()) {
             String hql = buildCountHql(builder);
             Query<Long> query = session.createQuery(hql, Long.class);
@@ -290,8 +301,6 @@ public class GenericRepository<T> {
     }
 
     protected int executeDelete(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
-
         if (builder.getConditions().isEmpty() && builder.getRawConditions().isEmpty()) {
             throw new IllegalStateException("Cannot execute delete without conditions. Add at least one where clause.");
         }
@@ -445,15 +454,6 @@ public class GenericRepository<T> {
             for (var entry : raw.parameters().entrySet()) {
                 query.setParameter(entry.getKey(), entry.getValue());
             }
-        }
-    }
-
-    protected void validateQueryFields(QueryBuilder<T> builder) {
-        for (QueryBuilder.Condition c : builder.getConditions()) {
-            validateFieldName(c.field());
-        }
-        for (QueryBuilder.OrderBy o : builder.getOrderBys()) {
-            validateFieldName(o.field());
         }
     }
 }

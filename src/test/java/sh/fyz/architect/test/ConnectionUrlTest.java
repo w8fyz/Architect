@@ -6,7 +6,9 @@ import sh.fyz.architect.migration.ShadowDatabase;
 import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 import sh.fyz.architect.persistent.sql.TlsMode;
 import sh.fyz.architect.persistent.sql.provider.H2Auth;
+import sh.fyz.architect.persistent.sql.provider.MariaDBAuth;
 import sh.fyz.architect.persistent.sql.provider.MySQLAuth;
+import sh.fyz.architect.persistent.sql.provider.PostgreSQLAuth;
 import sh.fyz.architect.persistent.sql.provider.SQLiteAuth;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -35,10 +37,23 @@ public class ConnectionUrlTest {
     }
 
     @Test
-    @DisplayName("MySQL : DISABLE laisse le defaut du driver, les autres modes demandent TLS")
+    @DisplayName("MySQL : DRIVER_DEFAULT laisse le defaut du driver, DISABLE force le texte clair")
     void testMySqlTls() {
         assertEquals("jdbc:mysql://h:3306/app", new MySQLAuth("h", 3306, "app").getUrl());
+        assertEquals("jdbc:mysql://h:3306/app?useSSL=false",
+                new MySQLAuth("h", 3306, "app").withTls(TlsMode.DISABLE).getUrl());
         assertTrue(new MySQLAuth("h", 3306, "app").withTls(TlsMode.REQUIRE).getUrl().contains("requireSSL=true"));
+    }
+
+    @Test
+    @DisplayName("PostgreSQL et MariaDB : DRIVER_DEFAULT sans parametre, DISABLE force le texte clair")
+    void testPostgresAndMariaDbTls() {
+        assertEquals("jdbc:postgresql://h:5432/app", new PostgreSQLAuth("h", 5432, "app").getUrl());
+        assertEquals("jdbc:postgresql://h:5432/app?sslmode=disable",
+                new PostgreSQLAuth("h", 5432, "app").withTls(TlsMode.DISABLE).getUrl());
+        assertEquals("jdbc:mariadb://h:3306/app", new MariaDBAuth("h", 3306, "app").getUrl());
+        assertEquals("jdbc:mariadb://h:3306/app?useSsl=false",
+                new MariaDBAuth("h", 3306, "app").withTls(TlsMode.DISABLE).getUrl());
     }
 
     @Test

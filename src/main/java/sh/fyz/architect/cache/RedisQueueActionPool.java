@@ -23,10 +23,24 @@ public class RedisQueueActionPool {
     private final ExecutorService threadPool;
     private final boolean isReceiver;
     private volatile boolean running = true;
+    // Entity types whose cache was loaded from the database since this pool (Redis manager) started.
+    private final java.util.Set<Class<?>> loadedTypes = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /**
+     * Claims loading the cache of an entity type from the database, once per pool: true for the
+     * first caller only, until {@link #releaseCacheLoad} if that load fails.
+     */
+    public boolean claimCacheLoad(Class<?> type) {
+        return loadedTypes.add(type);
+    }
+
+    public void releaseCacheLoad(Class<?> type) {
+        loadedTypes.remove(type);
+    }
+
+    /** Flushes this repository's queued writes from now on; adding it again does nothing. */
     public void add(GenericCachedRepository<?> repository) {
-        queue.add(repository);
-        repository.all();
+        queue.addIfAbsent(repository);
     }
 
     public void add(DatabaseAction<?> action, GenericRepository<?> repository) {
@@ -158,6 +172,14 @@ public class RedisQueueActionPool {
                 repository.flushUpdates();
             } catch (Exception e) {
                 LOG.warning("Error flushing updates for repository on shutdown: " + e.getMessage());
+            }
+            // Reported here, not rate-limited like the flush failures: after stop() nothing
+            // retries them until this Architect starts again, and they are lost if the JVM exits.
+            int left = repository.pendingWriteCount();
+            if (left > 0) {
+                LOG.warning(left + " queued write(s) of " + repository.getEntityClass().getSimpleName()
+                        + " could not be flushed on shutdown: they are applied if Architect starts"
+                        + " again in this process while the repository is still in use, and lost otherwise");
             }
         }
     }

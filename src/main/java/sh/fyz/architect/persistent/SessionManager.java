@@ -216,9 +216,12 @@ public class SessionManager {
         return sessionFactory.openSession();
     }
 
-    public void close() {
-        // Async repository calls still queued or running need the SessionFactory: let them
-        // finish before closing it, instead of failing them (and losing their writes).
+    /**
+     * Refuses new async repository calls and waits up to 5 seconds for those queued or running,
+     * then interrupts the rest. {@code Architect.stop()} calls it before shutting Redis down,
+     * which the async calls of cached repositories need too.
+     */
+    public void awaitAsyncCalls() {
         threadPool.shutdown();
         try {
             if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -227,6 +230,14 @@ public class SessionManager {
         } catch (InterruptedException e) {
             threadPool.shutdownNow();
             Thread.currentThread().interrupt();
+        }
+    }
+
+    public void close() {
+        // Async repository calls still queued or running need the SessionFactory: let them
+        // finish before closing it, instead of failing them (and losing their writes).
+        try {
+            awaitAsyncCalls();
         } finally {
             if (sessionFactory != null) {
                 sessionFactory.close();

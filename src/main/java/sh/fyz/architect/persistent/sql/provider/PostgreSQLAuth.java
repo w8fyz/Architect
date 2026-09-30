@@ -8,7 +8,7 @@ public class PostgreSQLAuth extends SQLAuthProvider {
     private final String hostname;
     private final String database;
     private final int port;
-    private TlsMode tlsMode = TlsMode.DISABLE;
+    private TlsMode tlsMode = TlsMode.DRIVER_DEFAULT;
 
     public PostgreSQLAuth(String hostname, int port, String database) {
         validateHost(hostname);
@@ -43,7 +43,8 @@ public class PostgreSQLAuth extends SQLAuthProvider {
 
     private String tlsParams() {
         return switch (tlsMode) {
-            case DISABLE -> "";
+            case DRIVER_DEFAULT -> "";
+            case DISABLE -> "?sslmode=disable";
             case PREFER -> "?sslmode=prefer";
             case REQUIRE -> "?sslmode=require";
             case VERIFY_CA -> "?sslmode=verify-ca";
