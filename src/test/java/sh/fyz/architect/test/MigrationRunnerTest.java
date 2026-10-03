@@ -436,6 +436,83 @@ public class MigrationRunnerTest {
     }
 
     @Test
+    @Order(54)
+    @DisplayName("meme version brute : le doublon reste signale une fois l'un des fichiers applique")
+    void testSameRawVersionStaysReportedOnceApplied() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-raw-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_raw");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V7__a.sql"), "SELECT 1;");
+            assertEquals(1, dup.apply(false).size());
+            Files.writeString(dir.resolve("V7__b.sql"), "SELECT 2;");
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().anyMatch(p -> p.detail().contains("duplicate version")),
+                    "V7__b can never be recorded next to V7__a: " + problems);
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("checksum mismatch")),
+                    "V7__a did not change: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(55)
+    @DisplayName("versions equivalentes deja appliquees toutes les deux : pas de doublon signale")
+    void testEquivalentVersionsBothAppliedAreNotReported() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-applied-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_applied");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            // apply() itself does not check for duplicates (the CLI runs verify first), as on
+            // a database migrated before that check existed.
+            assertEquals(2, dup.apply(false).size());
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("duplicate version")),
+                    "both files are recorded: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(56)
+    @DisplayName("fichier applique renomme depuis, dans un groupe V1 / V01 : pas de doublon signale")
+    void testRenamedAppliedFileIsNotADuplicate() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-renamed-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_renamed");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            assertEquals(2, dup.apply(false).size());
+            Files.move(dir.resolve("V01__second.sql"), dir.resolve("V01__renamed.sql"));
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("duplicate version")),
+                    "both versions are recorded: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
     @Order(53)
     @DisplayName("decoupage SQL : commentaire bloc entre deux mots, BOM en tete")
     void testSqlSplitterEdgeCases() {

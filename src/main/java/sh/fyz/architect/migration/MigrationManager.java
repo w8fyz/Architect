@@ -131,7 +131,7 @@ public class MigrationManager {
 
     private void doClearDatabase() {
         try (Session session = SessionManager.get().getSession()) {
-            session.doWork(connection -> SqlDialect.dropAll(connection, dialect));
+            session.doWork(connection -> SqlDialect.dropAll(connection, dialect, false));
         }
         LOG.info("Database cleared successfully");
     }

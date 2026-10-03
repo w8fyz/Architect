@@ -201,9 +201,11 @@ migrate diff ci_check --shadow-url $SCRATCH_URL --dry-run | grep -q "No differen
   an already-applied file is reported by `verify` and blocks `apply`.
 - A migration numbered before something already applied is reported as out-of-order —
   it would silently be skipped on databases that are ahead.
-- Two files with the same version (`V7__a.sql` and `V7__b.sql`, or `V1` and `V01`) are
-  reported by `verify` and block `apply`, unless both are already applied: otherwise only
-  one of them could ever be recorded.
+- Two files with the same version are reported by `verify` and block `apply`, unless both
+  are already recorded (by filename). With the same spelling (`V7__a.sql` and `V7__b.sql`)
+  only one of them can ever be recorded: once one is applied, the other would be skipped
+  for good. With different spellings (`V1` and `V01`) both are applied, in an order that
+  depends on the spelling. Renumber the pending file.
 - The history table (`architect_schema_history`) is created automatically and never
   dropped by the CLI. `MigrationManager.clearDatabase` (the GUI's Clear tab) drops every
   table, the history table included.
@@ -211,9 +213,10 @@ migrate diff ci_check --shadow-url $SCRATCH_URL --dry-run | grep -q "No differen
 ## Known limitations
 
 - **Enum CHECK constraints are PostgreSQL-only.** Other dialects get an empty section.
-- **Destructive suggestions use PostgreSQL syntax** (`"..."` quoting, `DROP ... CASCADE`,
+- **Destructive suggestions use PostgreSQL syntax** (`DROP ... CASCADE`,
   `ALTER COLUMN ... TYPE ...`), except length/precision changes, which come from Hibernate
-  in the dialect's own syntax. They are commented out; adapt them if you run MySQL/MariaDB.
+  in the dialect's own syntax. Identifiers are quoted for the dialect (backticks on
+  MySQL/MariaDB). They are commented out; adapt them if you run MySQL/MariaDB.
 - **Not detected:** nullability changes, and indexes, unique keys or foreign keys removed
   from the model. Write those migrations by hand.
 - **Statements that cannot run inside a transaction** (PostgreSQL `CREATE INDEX

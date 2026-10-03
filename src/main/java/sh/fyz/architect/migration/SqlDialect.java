@@ -32,8 +32,12 @@ final class SqlDialect {
      * transaction, leaving the others alone (also MySQL / MariaDB's stored routines, and H2's
      * domains, aliases, constants and synonyms). PostgreSQL gets the {@code public} schema
      * recreated.
+     *
+     * @param otherSchemas also drop H2's other user schemas (not {@code PUBLIC}): a shadow
+     *                     database whose migrations run {@code CREATE SCHEMA} must be empty again
+     *                     for the next replay. Never for the application's database.
      */
-    static void dropAll(Connection connection, String dialect) throws SQLException {
+    static void dropAll(Connection connection, String dialect, boolean otherSchemas) throws SQLException {
         String lower = dialect.toLowerCase(Locale.ROOT);
         boolean wasAutoCommit = connection.getAutoCommit();
         try {
@@ -59,24 +63,22 @@ final class SqlDialect {
                 } else if (lower.contains("h2")) {
                     // Not DROP ALL OBJECTS: it drops every schema, the current one included, and
                     // a URL with ;SCHEMA=APP could not connect any more.
-                    String schema = quote(dialect, connection.getSchema()) + ".";
-                    dropEach(stmt, "DROP VIEW IF EXISTS ", objectNames(connection, dialect, "VIEW"), dialect, schema, " CASCADE");
-                    dropEach(stmt, "DROP SYNONYM IF EXISTS ", objectNames(connection, dialect, "SYNONYM"), dialect, schema, "");
-                    dropEach(stmt, "DROP TABLE IF EXISTS ", tableNames(connection, dialect), dialect, schema, " CASCADE");
-                    dropEach(stmt, "DROP TABLE IF EXISTS ", objectNames(connection, dialect, "GLOBAL TEMPORARY"),
-                            dialect, schema, " CASCADE");
-                    dropEach(stmt, "DROP SEQUENCE IF EXISTS ", h2Objects(connection,
-                            "SELECT SEQUENCE_NAME FROM INFORMATION_SCHEMA.SEQUENCES WHERE SEQUENCE_SCHEMA = ?"), dialect, schema, "");
-                    dropEach(stmt, "DROP DOMAIN IF EXISTS ", h2Objects(connection,
-                            "SELECT DOMAIN_NAME FROM INFORMATION_SCHEMA.DOMAINS WHERE DOMAIN_SCHEMA = ?"), dialect, schema, " CASCADE");
-                    dropEach(stmt, "DROP AGGREGATE IF EXISTS ", h2Objects(connection,
-                            "SELECT DISTINCT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ?"
-                                    + " AND ROUTINE_TYPE = 'AGGREGATE'"), dialect, schema, "");
-                    dropEach(stmt, "DROP ALIAS IF EXISTS ", h2Objects(connection,
-                            "SELECT DISTINCT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ?"
-                                    + " AND ROUTINE_TYPE <> 'AGGREGATE'"), dialect, schema, "");
-                    dropEach(stmt, "DROP CONSTANT IF EXISTS ", h2Objects(connection,
-                            "SELECT CONSTANT_NAME FROM INFORMATION_SCHEMA.CONSTANTS WHERE CONSTANT_SCHEMA = ?"), dialect, schema, "");
+                    String current = connection.getSchema();
+                    if (otherSchemas) {
+                        dropEach(stmt, "DROP SCHEMA IF EXISTS ", h2Objects(connection,
+                                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME <> ?"
+                                        + " AND SCHEMA_NAME NOT IN ('INFORMATION_SCHEMA', 'PUBLIC')"), dialect, "", " CASCADE");
+                        // PUBLIC cannot be dropped: emptied instead, when it is not the current schema.
+                        if (!"PUBLIC".equals(current)) {
+                            connection.setSchema("PUBLIC");
+                            try {
+                                dropH2Schema(connection, stmt, dialect);
+                            } finally {
+                                connection.setSchema(current);
+                            }
+                        }
+                    }
+                    dropH2Schema(connection, stmt, dialect);
                 } else {
                     // SQLite's DROP TABLE has no CASCADE.
                     String cascade = lower.contains("sqlite") ? "" : " CASCADE";
@@ -91,6 +93,28 @@ final class SqlDialect {
         } finally {
             connection.setAutoCommit(wasAutoCommit);
         }
+    }
+
+    /** Drops the objects of the connection's current H2 schema. */
+    private static void dropH2Schema(Connection connection, Statement stmt, String dialect) throws SQLException {
+        String schema = quote(dialect, connection.getSchema()) + ".";
+        dropEach(stmt, "DROP VIEW IF EXISTS ", objectNames(connection, dialect, "VIEW"), dialect, schema, " CASCADE");
+        dropEach(stmt, "DROP SYNONYM IF EXISTS ", objectNames(connection, dialect, "SYNONYM"), dialect, schema, "");
+        dropEach(stmt, "DROP TABLE IF EXISTS ", tableNames(connection, dialect), dialect, schema, " CASCADE");
+        dropEach(stmt, "DROP TABLE IF EXISTS ", objectNames(connection, dialect, "GLOBAL TEMPORARY"),
+                dialect, schema, " CASCADE");
+        dropEach(stmt, "DROP SEQUENCE IF EXISTS ", h2Objects(connection,
+                "SELECT SEQUENCE_NAME FROM INFORMATION_SCHEMA.SEQUENCES WHERE SEQUENCE_SCHEMA = ?"), dialect, schema, "");
+        dropEach(stmt, "DROP DOMAIN IF EXISTS ", h2Objects(connection,
+                "SELECT DOMAIN_NAME FROM INFORMATION_SCHEMA.DOMAINS WHERE DOMAIN_SCHEMA = ?"), dialect, schema, " CASCADE");
+        dropEach(stmt, "DROP AGGREGATE IF EXISTS ", h2Objects(connection,
+                "SELECT DISTINCT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ?"
+                        + " AND ROUTINE_TYPE = 'AGGREGATE'"), dialect, schema, "");
+        dropEach(stmt, "DROP ALIAS IF EXISTS ", h2Objects(connection,
+                "SELECT DISTINCT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ?"
+                        + " AND ROUTINE_TYPE <> 'AGGREGATE'"), dialect, schema, "");
+        dropEach(stmt, "DROP CONSTANT IF EXISTS ", h2Objects(connection,
+                "SELECT CONSTANT_NAME FROM INFORMATION_SCHEMA.CONSTANTS WHERE CONSTANT_SCHEMA = ?"), dialect, schema, "");
     }
 
     private static void dropEach(Statement stmt, String drop, List<String> names, String dialect,

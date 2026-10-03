@@ -10,12 +10,17 @@ import sh.fyz.architect.relationmodel.Owner;
 import sh.fyz.architect.relationmodel.Pet;
 import sh.fyz.architect.repositories.GenericCachedRepository;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 @DisplayName("GenericCachedRepository - Relations")
+// The first test counts every Owner: the later ones add their own.
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class CachedRelationsTest {
 
@@ -59,6 +64,7 @@ public class CachedRelationsTest {
     }
 
     @Test
+    @Order(1)
     @DisplayName("Relations bidirectionnelles - relues depuis le cache sans boucle infinie")
     void testBidirectionalRelationsFromCache() {
         Owner owner = owners.save(new Owner("Alice"));
@@ -85,5 +91,54 @@ public class CachedRelationsTest {
         assertNotNull(cachedPet);
         assertEquals("Alice", cachedPet.getOwner().getName());
         assertEquals(1, owners.all().size());
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("all() reconstruit chaque entite liee une seule fois (pas de graphe par entite)")
+    void testAllRebuildsSharedRelationsOnce() {
+        Owner owner = owners.save(new Owner("Bob"));
+        for (int i = 0; i < 200; i++) {
+            pets.save(new Pet("pet-" + i, owner));
+        }
+        // Cache the owner with its 200 pets: each pet then leads back to all the others.
+        RedisManager.get().delete("Owner:" + owner.getId());
+        assertEquals(200, owners.findById(owner.getId()).getPets().size());
+
+        List<Pet> bobsPets = pets.all().stream()
+                .filter(p -> p.getOwner() != null && owner.getId().equals(p.getOwner().getId()))
+                .toList();
+        assertEquals(200, bobsPets.size());
+        // One Owner instance for the whole call: rebuilt once, not once per pet with its graph.
+        Set<Owner> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+        bobsPets.forEach(p -> distinct.add(p.getOwner()));
+        assertEquals(1, distinct.size(), "the shared owner was rebuilt once per pet");
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("all() n'expose pas d'entite pointant vers une relation a moitie reconstruite")
+    void testAllDiscardsAFailedGraph() {
+        Owner owner = owners.save(new Owner("Carol"));
+        Pet broken = null;
+        for (int i = 0; i < 20; i++) {
+            Pet pet = pets.save(new Pet("carol-" + i, owner));
+            if (i == 10) broken = pet;
+        }
+        RedisManager.get().delete("Owner:" + owner.getId());
+        assertEquals(20, owners.findById(owner.getId()).getPets().size());
+        // One of Carol's pets is unreadable: rebuilding Carol, and so each of her pets, fails.
+        String brokenKey = "architect:Pet:" + broken.getId();
+        RedisManager.get().getRedisClient().set(brokenKey, "{\"id\":\"not-a-number\"}");
+        try {
+            for (Pet pet : pets.all()) {
+                if (pet.getOwner() != null && owner.getId().equals(pet.getOwner().getId())) {
+                    assertEquals(20, pet.getOwner().getPets().size(),
+                            pet.getName() + " points to an Owner left half-built by the failure");
+                }
+            }
+        } finally {
+            RedisManager.get().delete("Pet:" + broken.getId());
+        }
     }
 }

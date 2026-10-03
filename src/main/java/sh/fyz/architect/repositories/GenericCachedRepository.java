@@ -4,6 +4,7 @@ import sh.fyz.architect.entities.DatabaseAction;
 import sh.fyz.architect.entities.IdentifiableEntity;
 import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.cache.RedisQueueActionPool;
+import sh.fyz.architect.persistent.DatabaseFailures;
 
 import jakarta.persistence.ElementCollection;
 import jakarta.persistence.ManyToMany;
@@ -69,6 +70,13 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private int unreportedFailures;
     private long lastFailureReport;
     private boolean failing;
+    /**
+     * Serialize, per entity, a cache write with its queuing (save, delete) against a flush's
+     * check for later writes and its own cache write (see {@link #refreshDropped}): a save
+     * landing in between would otherwise be overwritten in Redis by the older row. Striped by id,
+     * so saves of different entities rarely wait for each other's Redis round trip.
+     */
+    private final ReentrantLock[] cacheLocks = new ReentrantLock[32];
     /** Writes taken from the queues by the flush in progress; written under {@link #flushLock}. */
     private volatile int inFlight;
     private final String cacheKeyPrefix;
@@ -81,6 +89,9 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         this.type = type;
         this.cacheKeyPrefix = type.getSimpleName() + ":";
         this.allEntitiesKey = cacheKeyPrefix + "*";
+        for (int i = 0; i < cacheLocks.length; i++) {
+            cacheLocks[i] = new ReentrantLock();
+        }
         attach();
         INSTANCES.add(this);
     }
@@ -234,10 +245,16 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
 
         String key = cacheKeyPrefix + entity.getId();
-        RedisManager.get().save(key, entity);
+        ReentrantLock lock = cacheLock(entity.getId());
+        lock.lock();
+        try {
+            RedisManager.get().save(key, entity);
 
-        if (RedisManager.get().isReceiver()) {
-            updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
+            if (RedisManager.get().isReceiver()) {
+                updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.SAVE));
+            }
+        } finally {
+            lock.unlock();
         }
         return entity;
     }
@@ -262,10 +279,17 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     @Override
     public void delete(T entity) {
         attach();
-        evictFromCache(entity.getId());
         if (RedisManager.get().isReceiver()) {
-            updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+            ReentrantLock lock = cacheLock(entity.getId());
+            lock.lock();
+            try {
+                evictFromCache(entity.getId());
+                updateQueue.add(new DatabaseAction<>(entity, DatabaseAction.Type.DELETE));
+            } finally {
+                lock.unlock();
+            }
         } else {
+            evictFromCache(entity.getId());
             super.delete(entity);
         }
     }
@@ -277,6 +301,11 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     @Override
     protected void beforeMerge(Session session, T entity) {
         alignVersion(session, entity, entity.getId());
+    }
+
+    /** The lock of {@link #cacheLocks} guarding this entity's cache entry; null ids share one. */
+    private ReentrantLock cacheLock(Object id) {
+        return cacheLocks[id == null ? 0 : Math.floorMod(id.hashCode(), cacheLocks.length)];
     }
 
     /** Removes one entity from Redis, leaving the database alone. */
@@ -426,10 +455,20 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
         }
         try {
             T row = super.findById(id);
-            if (row != null) {
-                RedisManager.get().save(cacheKeyPrefix + id, row);
-            } else {
-                evictFromCache(id);
+            ReentrantLock lock = cacheLock(id);
+            lock.lock();
+            try {
+                // Checked again: a save since the first check cached a newer state than this row.
+                if (hasLaterAction(id, batch, index)) {
+                    return;
+                }
+                if (row != null) {
+                    RedisManager.get().save(cacheKeyPrefix + id, row);
+                } else {
+                    evictFromCache(id);
+                }
+            } finally {
+                lock.unlock();
             }
         } catch (RuntimeException e) {
             LOG.warning("Failed to refresh " + type.getSimpleName() + " " + id + " in the cache: " + e.getMessage());
@@ -510,8 +549,17 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
     private void evictCommittedDelete(List<DatabaseAction<T>> batch, int index) {
         DatabaseAction<T> item = batch.get(index);
         Object id = item.getEntity().getId();
-        if (item.getType() == DatabaseAction.Type.DELETE && id != null && !hasLaterAction(id, batch, index)) {
-            evictQuietly(id);
+        if (item.getType() != DatabaseAction.Type.DELETE || id == null) {
+            return;
+        }
+        ReentrantLock lock = cacheLock(id);
+        lock.lock();
+        try {
+            if (!hasLaterAction(id, batch, index)) {
+                evictQuietly(id);
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -540,82 +588,25 @@ public class GenericCachedRepository<T extends IdentifiableEntity> extends Gener
 
     /**
      * How the write was refused, or null when the database could not process it at all (see
-     * {@link #isUnavailable}): such a write is fine and waits for the database, however long
+     * {@link DatabaseFailures#isUnavailable}): such a write is fine and waits for the database, however long
      * that takes. Any other failure is bounded, or one write would block every later write of
      * this type (and {@link #executeDelete}) for good.
      */
     private static Rejection rejection(Throwable e) {
-        if (isUnavailable(e)) {
+        if (DatabaseFailures.isUnavailable(e)) {
             return null;
         }
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof org.hibernate.exception.ConstraintViolationException cve) {
-                return switch (cve.getKind()) {
-                    case NOT_NULL, CHECK -> Rejection.PERMANENT;
-                    // Each repository flushes on its own: a child's delete queued in another
-                    // repository may commit after its parent's, which fails until then.
-                    case FOREIGN_KEY, UNIQUE, OTHER -> Rejection.RETRYABLE;
-                };
-            }
-            if (t instanceof org.hibernate.exception.DataException
-                    || t instanceof org.hibernate.PropertyValueException) {
-                return Rejection.PERMANENT;
-            }
-        }
-        // Foreign keys and unique keys, but also a relation pointing to a row deleted meanwhile
-        // (EntityNotFoundException) or to an entity no longer persistent: the other rows may
-        // still change, so the write gets a few more attempts.
-        return Rejection.RETRYABLE;
-    }
-
-    /**
-     * Whether the database could not process the write at all: connection lost or refused,
-     * lock or statement timeout, deadlock or serialization failure, server overloaded, shutting
-     * down or read-only (a failover in progress). Recognized by exception type and by standard
-     * SQLSTATE class (08, 25, 40, 53, 57, 58, HYT), for the drivers and dialects Hibernate does
-     * not map to a specific type; MySQL and MariaDB report a read-only server with vendor codes
-     * only.
-     */
-    private static boolean isUnavailable(Throwable e) {
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof org.hibernate.exception.JDBCConnectionException
-                    || t instanceof org.hibernate.exception.LockAcquisitionException
-                    || t instanceof org.hibernate.PessimisticLockException
-                    || t instanceof org.hibernate.QueryTimeoutException
-                    || t instanceof jakarta.persistence.PessimisticLockException
-                    || t instanceof jakarta.persistence.LockTimeoutException
-                    || t instanceof jakarta.persistence.QueryTimeoutException
-                    || t instanceof java.sql.SQLTransientException
-                    || t instanceof java.sql.SQLRecoverableException) {
-                return true;
-            }
-            if (t instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
-                String state = sql.getSQLState();
-                if (state.startsWith("08") || state.startsWith("25") || state.startsWith("40")
-                        || state.startsWith("53") || state.startsWith("57") || state.startsWith("58")
-                        || state.startsWith("HYT")) {
-                    return true;
-                }
-            }
-            // ER_OPTION_PREVENTS_STATEMENT (--read-only, --super-read-only) and ER_READ_ONLY_MODE,
-            // both with SQLSTATE HY000.
-            if (t instanceof java.sql.SQLException sql && "HY000".equals(sql.getSQLState())
-                    && (sql.getErrorCode() == 1290 || sql.getErrorCode() == 1836)) {
-                return true;
-            }
-        }
-        return false;
+        // Foreign keys and unique keys (each repository flushes on its own: a child's delete
+        // queued in another repository may commit after its parent's, which fails until then),
+        // but also a relation pointing to a row deleted meanwhile (EntityNotFoundException) or to
+        // an entity no longer persistent: the other rows may still change, so the write gets a
+        // few more attempts.
+        return DatabaseFailures.isPermanentRejection(e) ? Rejection.PERMANENT : Rejection.RETRYABLE;
     }
 
     /** Whether the failure is an optimistic-lock one: the entity's row was deleted or changed meanwhile. */
     private static boolean isStaleRow(Throwable e) {
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof jakarta.persistence.OptimisticLockException
-                    || t instanceof org.hibernate.StaleStateException) {
-                return true;
-            }
-        }
-        return false;
+        return DatabaseFailures.isStaleRow(e);
     }
 
     @Override

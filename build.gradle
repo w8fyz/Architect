@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'sh.fyz'
-version = '2.2.5'
+version = '3.0.0'
 
 tasks.withType(JavaCompile).configureEach {
     // Any JDK 21+ can build; the bytecode and the JDK API used stay at Java 21.
@@ -56,6 +56,8 @@ dependencies {
     examplesRuntimeOnly 'org.postgresql:postgresql:42.7.13'
 
     testImplementation 'org.postgresql:postgresql:42.7.13'
+    // In-memory, for the H2-specific schema handling (SqlDialect).
+    testImplementation 'com.h2database:h2:2.3.232'
     testImplementation 'org.junit.jupiter:junit-jupiter:6.1.3'
     testImplementation 'org.awaitility:awaitility:4.3.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

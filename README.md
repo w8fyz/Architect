@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.5'
+    implementation 'sh.fyz:Architect:3.0.0'
 }
 ```
 
@@ -24,7 +24,7 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.5</version>
+    <version>3.0.0</version>
 </dependency>
 ```
 
@@ -456,7 +456,7 @@ Reads the `.sql` file and executes all statements in a single transaction with a
 manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION); // "CONFIRM_DROP_ALL"
 ```
 
-Drops all tables. Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies. The confirmation token is required to prevent accidental destructive calls. The no-argument overload is `@Deprecated` and logs a warning; it will be removed in a future major release.
+Drops every table, view and sequence of the application's schema (also the stored functions and procedures of a MySQL / MariaDB database, and H2's domains, aliases, constants and synonyms). Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies. The confirmation token is required to prevent accidental destructive calls. The no-argument overload is `@Deprecated` and logs a warning; it will be removed in a future major release.
 
 ### Inspect the database
 
@@ -502,6 +502,20 @@ architect.stop();
 This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis. It first waits (up to 5 seconds) for async calls still running, then flushes the cached writes still queued, and only then closes the database.
 
 `stop()` followed by `start()` works: repositories created before the restart keep working, and cached and relay repositories attach to the new Redis connection (flush queue, pub/sub subscription) on their own.
+
+## What's new in 3.0.0
+
+Breaking changes, check them before upgrading:
+
+- **Hibernate 7** (from 6.6) and **Jedis 8** (from 7.4). Both are exposed to applications: code using `SessionManager.get().getSession()` directly must follow the [Hibernate 7 migration guide](https://docs.hibernate.org/orm/7.0/migration-guide/) (`Session.save` / `update` / `saveOrUpdate` / `delete` are gone; merging a detached entity whose row was deleted now throws). `jedis` and `jackson-databind` are now `api` dependencies.
+- **`RedisManager`** exposes Jedis 8's `RedisClient` (`getRedisClient()`) instead of a `JedisPool`.
+- **TLS**: the default `TlsMode` is now `DRIVER_DEFAULT` instead of `DISABLE`, so MySQL uses TLS whenever the server offers it. An explicit `withTls(TlsMode.DISABLE)` on PostgreSQL now adds `sslmode=disable` (it used to add nothing, which meant the driver's `prefer`): a server that only accepts TLS connections refuses it.
+- **Cached / relay repositories** are last-writer-wins, `@Version` entities included: use `GenericRepository` where concurrent updates must be detected. `query()...delete()` on a receiver throws `IllegalStateException` while writes of that type are still waiting to be retried.
+- **`query().limit(0)`** returns no rows (it used to mean no limit).
+- **Migrations**: `verify` reports two files with the same version (`V7__a` / `V7__b`, `V1` / `V01`) and the CLI's `apply` refuses them, unless both are already recorded. Renumber the pending one.
+- **`threadPoolSize`** is deprecated and ignored: async calls run on virtual threads.
+
+See the pull request for the full list of fixes (cache consistency, lifecycle, migrations).
 
 ## What's new in 2.2.0
 

@@ -164,7 +164,7 @@ public class ShadowDatabase {
 
     /** Drops everything. PostgreSQL gets the schema recreated; other dialects are dropped table by table. */
     public void clear() {
-        withConnection(connection -> SqlDialect.dropAll(connection, shadow.getDialect()));
+        withConnection(connection -> SqlDialect.dropAll(connection, shadow.getDialect(), true));
     }
 
     private void execute(List<String> statements, String label) {

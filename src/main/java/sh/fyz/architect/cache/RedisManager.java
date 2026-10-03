@@ -391,12 +391,39 @@ public class RedisManager {
 
         List<T> result = new ArrayList<>(entries.size());
         List<PendingRelation> pending = new ArrayList<>();
+        // Shared by the whole call: an entity already rebuilt as another's relation (every Pet
+        // pointing to its Owner, and the Owner to every Pet) is reused, not rebuilt with its
+        // whole graph once per entity, which costs one Redis GET per node each time.
+        List<String> rebuiltKeys = new ArrayList<>();
+        Map<String, Object> rebuilt = new HashMap<>() {
+            @Override
+            public Object put(String key, Object value) {
+                Object previous = super.put(key, value);
+                if (previous == null) {
+                    rebuiltKeys.add(key);
+                }
+                return previous;
+            }
+        };
         for (Map.Entry<String, String> entry : entries.entrySet()) {
+            Object existing = rebuilt.get(entry.getKey());
+            if (type.isInstance(existing)) {
+                result.add(type.cast(existing));
+                continue;
+            }
+            int keysBefore = rebuiltKeys.size();
+            int pendingBefore = pending.size();
             try {
                 Map<String, Object> rawData = objectMapper.readValue(entry.getValue(), MAP_TYPE_REF);
-                T entity = reconstructEntity(rawData, type, entry.getKey(), new HashMap<>(), pending);
+                T entity = reconstructEntity(rawData, type, entry.getKey(), rebuilt, pending);
                 if (entity != null) result.add(entity);
             } catch (Exception e) {
+                // Everything this entity's graph rebuilt is discarded: an entity rebuilt along the
+                // way may point to one left half-built by the failure, and must not be returned.
+                List<String> discarded = rebuiltKeys.subList(keysBefore, rebuiltKeys.size());
+                discarded.forEach(rebuilt::remove);
+                discarded.clear();
+                pending.subList(pendingBefore, pending.size()).clear();
                 LOG.warning("Failed to deserialize cached entity: " + e.getMessage());
             }
         }
@@ -751,6 +778,10 @@ public class RedisManager {
     }
 
     public void shutdown() {
+        // Cleared for the waits below, restored at the end: called from a thread already
+        // interrupted, every wait would throw at once, cutting off the async calls and skipping
+        // the final flush (see RedisQueueActionPool.shutdown).
+        boolean interrupted = Thread.interrupted();
         // Async calls still queued or running write to Redis: let them finish first.
         asyncExecutor.shutdown();
         try {
@@ -758,8 +789,8 @@ public class RedisManager {
                 asyncExecutor.shutdownNow();
             }
         } catch (InterruptedException e) {
+            interrupted = true;
             asyncExecutor.shutdownNow();
-            Thread.currentThread().interrupt();
         }
         isAlive = false;
         // Unblocks each subscriber's blocking subscribe() so its thread can exit; otherwise
@@ -768,21 +799,25 @@ public class RedisManager {
             subscriber.unsubscribe();
         }
         try {
-            if (redisQueueActionPool != null) {
-                redisQueueActionPool.shutdown();
-            }
-        } finally {
-            // Even if the final flush threw: the subscriber threads and connections go anyway.
+            // Subscribers first: unsubscribe() is asynchronous, and a message a subscriber still
+            // reads would be queued after the final drain of the relayed actions, and lost.
             pubSubExecutor.shutdown();
             try {
                 if (!pubSubExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
                     pubSubExecutor.shutdownNow();
                 }
             } catch (InterruptedException e) {
+                interrupted = true;
                 pubSubExecutor.shutdownNow();
+            }
+            if (redisQueueActionPool != null) {
+                redisQueueActionPool.shutdown();
+            }
+        } finally {
+            // Even if the final flush threw: the connections go anyway.
+            client.close();
+            if (interrupted || Thread.interrupted()) {
                 Thread.currentThread().interrupt();
-            } finally {
-                client.close();
             }
         }
     }

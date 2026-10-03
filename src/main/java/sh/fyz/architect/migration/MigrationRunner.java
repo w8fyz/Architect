@@ -18,6 +18,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -200,22 +201,34 @@ public class MigrationRunner {
      */
     public List<Problem> verify() {
         List<Problem> problems = new ArrayList<>();
-        Map<String, Available> onDisk = new LinkedHashMap<>();
-        // History is keyed by version: of two files sharing one (V7__a / V7__b, or V1 / V01),
-        // whichever is applied first hides the other for good, or both run on a fresh database.
-        // Groups already fully applied (both rows recorded) are history, not a hazard: renaming
-        // either file now would only trade this report for a missing-file one.
+        // History is keyed by the raw version. Two files with the same raw version (V7__a /
+        // V7__b) can never both be recorded: once one is applied, the other is skipped for good.
+        // Two that only compare equal (V1 / V01) are both recorded, but in an order that depends
+        // on their spelling. Groups whose files are all recorded are history, not a hazard:
+        // renaming either file now would only trade this report for a missing-file one. A file
+        // counts as recorded by its filename, or by its raw version when no other file has that
+        // raw version (an applied file renamed since, which nothing else reports either).
         List<Applied> history = applied();
+        Set<String> appliedFiles = new HashSet<>();
         Set<String> appliedVersions = new HashSet<>();
         for (Applied applied : history) {
+            appliedFiles.add(applied.filename());
             appliedVersions.add(applied.version());
         }
+        List<Available> files = available();
+        Map<String, Available> byFilename = new HashMap<>();
+        Map<String, Available> byRaw = new LinkedHashMap<>();
+        Map<String, Integer> rawCounts = new HashMap<>();
+        for (Available a : files) {
+            byFilename.put(a.filename(), a);
+            byRaw.putIfAbsent(a.version().raw(), a);
+            rawCounts.merge(a.version().raw(), 1, Integer::sum);
+        }
         Map<List<Long>, Available> byNumericVersion = new LinkedHashMap<>();
-        for (Available a : available()) {
-            onDisk.put(a.version().raw(), a);
+        for (Available a : files) {
             Available first = byNumericVersion.putIfAbsent(numericKey(a.version()), a);
-            if (first != null && !(appliedVersions.contains(first.version().raw())
-                    && appliedVersions.contains(a.version().raw()))) {
+            if (first != null && !(isRecorded(first, appliedFiles, appliedVersions, rawCounts)
+                    && isRecorded(a, appliedFiles, appliedVersions, rawCounts))) {
                 problems.add(new Problem(a.version().raw(),
                         "duplicate version: " + first.filename() + " and " + a.filename()
                                 + " have the same version; renumber one of them"));
@@ -224,7 +237,11 @@ public class MigrationRunner {
 
         MigrationVersion highestApplied = null;
         for (Applied applied : history) {
-            Available disk = onDisk.get(applied.version());
+            // By filename first: of two files with the same raw version, the one applied.
+            Available disk = byFilename.get(applied.filename());
+            if (disk == null || !disk.version().raw().equals(applied.version())) {
+                disk = byRaw.get(applied.version());
+            }
             if (disk == null) {
                 problems.add(new Problem(applied.version(),
                         "applied on " + applied.filename() + " but that file is missing from "
@@ -431,7 +448,14 @@ public class MigrationRunner {
     }
 
     /** Version segments without trailing zeros, so that V1, V01 and V1.0 compare equal. */
-    private static List<Long> numericKey(MigrationVersion version) {
+    private static boolean isRecorded(Available file, Set<String> appliedFiles, Set<String> appliedVersions,
+                                      Map<String, Integer> rawCounts) {
+        String raw = file.version().raw();
+        return appliedFiles.contains(file.filename())
+                || (appliedVersions.contains(raw) && rawCounts.get(raw) == 1);
+    }
+
+        private static List<Long> numericKey(MigrationVersion version) {
         List<Long> segments = new ArrayList<>(version.segments());
         while (segments.size() > 1 && segments.get(segments.size() - 1) == 0L) {
             segments.remove(segments.size() - 1);

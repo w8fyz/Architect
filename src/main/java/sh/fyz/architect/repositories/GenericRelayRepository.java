@@ -26,12 +26,14 @@ public class GenericRelayRepository<T extends IdentifiableEntity> extends Generi
 
     /**
      * Subscribes again on the new Redis manager (the subscription is per manager), at once: a
-     * receiver gets relayed writes without ever calling this repository.
+     * receiver gets relayed writes without ever calling this repository. Subscribed first: if
+     * flushing the writes queued before the restart fails, nothing would subscribe again and
+     * relayed writes of this type would be ignored for the whole run.
      */
     @Override
     protected void onRestart() {
-        super.onRestart();
         channelPubSub.subscribe();
+        super.onRestart();
     }
 
     @Override

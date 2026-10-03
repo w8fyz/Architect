@@ -291,7 +291,7 @@ Migration filenames are validated and resolved against the migration directory; 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.5'
+    implementation 'sh.fyz:Architect:3.0.0'
 }
 ```
 
@@ -301,6 +301,6 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.5</version>
+    <version>3.0.0</version>
 </dependency>
 ```
