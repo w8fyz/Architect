@@ -46,7 +46,7 @@ public class MigrationRunnerTest {
                 .setReceiver(true)
                 .setDatabaseCredentials(new DatabaseCredentials(
                         new PostgreSQLAuth(DB_HOST, DB_PORT, DB_NAME),
-                        DB_USER, DB_PASS, 2, 2, "update"
+                        DB_USER, DB_PASS, 2, "update"
                 ));
         architect.addEntityClass(Product.class);
         architect.start();
@@ -415,6 +415,112 @@ public class MigrationRunnerTest {
     }
 
     @Test
+    @Order(52)
+    @DisplayName("deux fichiers de meme version sont signales par verify")
+    void testDuplicateVersionsAreReported() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup");
+        try {
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().anyMatch(p -> p.detail().contains("duplicate version")),
+                    "V1 and V01 share a version: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(54)
+    @DisplayName("meme version brute : le doublon reste signale une fois l'un des fichiers applique")
+    void testSameRawVersionStaysReportedOnceApplied() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-raw-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_raw");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V7__a.sql"), "SELECT 1;");
+            assertEquals(1, dup.apply(false).size());
+            Files.writeString(dir.resolve("V7__b.sql"), "SELECT 2;");
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().anyMatch(p -> p.detail().contains("duplicate version")),
+                    "V7__b can never be recorded next to V7__a: " + problems);
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("checksum mismatch")),
+                    "V7__a did not change: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(55)
+    @DisplayName("versions equivalentes deja appliquees toutes les deux : pas de doublon signale")
+    void testEquivalentVersionsBothAppliedAreNotReported() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-applied-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_applied");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            // apply() itself does not check for duplicates (the CLI runs verify first), as on
+            // a database migrated before that check existed.
+            assertEquals(2, dup.apply(false).size());
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("duplicate version")),
+                    "both files are recorded: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(56)
+    @DisplayName("fichier applique renomme depuis, dans un groupe V1 / V01 : pas de doublon signale")
+    void testRenamedAppliedFileIsNotADuplicate() throws IOException {
+        Path dir = Files.createTempDirectory("architect-runner-dup-renamed-");
+        MigrationRunner dup = new MigrationRunner(architect, dir, MigrationRunner.HISTORY_TABLE + "_dup_renamed");
+        try {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            Files.writeString(dir.resolve("V1__first.sql"), "SELECT 1;");
+            Files.writeString(dir.resolve("V01__second.sql"), "SELECT 2;");
+            assertEquals(2, dup.apply(false).size());
+            Files.move(dir.resolve("V01__second.sql"), dir.resolve("V01__renamed.sql"));
+
+            List<MigrationRunner.Problem> problems = dup.verify();
+            assertTrue(problems.stream().noneMatch(p -> p.detail().contains("duplicate version")),
+                    "both versions are recorded: " + problems);
+        } finally {
+            runner.manager().executeSql("DROP TABLE IF EXISTS " + dup.historyTable());
+            try (var files = Files.list(dir)) {
+                for (Path p : files.toList()) Files.deleteIfExists(p);
+            }
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    @Order(53)
+    @DisplayName("decoupage SQL : commentaire bloc entre deux mots, BOM en tete")
+    void testSqlSplitterEdgeCases() {
+        assertDoesNotThrow(() -> runner.manager().executeSql(
+                "\uFEFFCREATE TABLE/*c*/runner_split (id INT); DROP TABLE runner_split;"));
+    }
+
+    @Test
     @Order(51)
     @DisplayName("le nom de table d'historique est contraint au prefixe de l'outil")
     void testHistoryTableNameIsValidated() {
@@ -423,5 +529,47 @@ public class MigrationRunnerTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new MigrationRunner(architect, migrationDir,
                         MigrationRunner.HISTORY_TABLE + "_x; DROP TABLE"));
+    }
+
+    @Test
+    @Order(90)
+    @DisplayName("baseline : ne reecrit jamais un fichier existant, refuse une version deja prise")
+    void testBaselineNeverRewritesAFile() throws Exception {
+        Path dir = Files.createTempDirectory("architect-baseline-test-");
+        String history = MigrationRunner.HISTORY_TABLE + "_baseline_test";
+        MigrationRunner r = new MigrationRunner(architect, dir, history);
+        try {
+            r.manager().executeSql("DROP TABLE IF EXISTS " + history);
+            MigrationRunner.Available first = r.baseline("1");
+            Path file = dir.resolve(first.filename());
+            // Committed, then edited by hand: no longer what a fresh snapshot would produce.
+            Files.writeString(file, Files.readString(file) + "-- reviewed\n");
+            String committed = Files.readString(file);
+
+            // A second database adopted at the same point.
+            r.manager().executeSql("DROP TABLE " + history);
+            r.baseline("1");
+            assertEquals(committed, Files.readString(file), "the committed file must not be rewritten");
+            assertTrue(r.verify().isEmpty(), "the recorded checksum must be the file's: " + r.verify());
+
+            // A dotted version is written V1_5: the same version, found again.
+            r.manager().executeSql("DROP TABLE " + history);
+            Files.delete(file);
+            MigrationRunner.Available dotted = r.baseline("1.5");
+            r.manager().executeSql("DROP TABLE " + history);
+            assertEquals(dotted.filename(), r.baseline("1.5").filename());
+
+            Files.writeString(dir.resolve("V2__other.sql"), "SELECT 1;");
+            r.manager().executeSql("DROP TABLE " + history);
+            assertThrows(IllegalStateException.class, () -> r.baseline("2"));
+            assertFalse(Files.exists(dir.resolve("V2__baseline.sql")));
+        } finally {
+            r.manager().executeSql("DROP TABLE IF EXISTS " + history);
+            try (var files = Files.walk(dir)) {
+                files.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                });
+            }
+        }
     }
 }

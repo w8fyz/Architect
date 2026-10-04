@@ -41,10 +41,10 @@ public class SchemaGenerator {
             tempFile = Files.createTempFile("architect-migration-", ".sql");
 
             Map<String, Object> settings = new HashMap<>();
-            settings.put(AvailableSettings.DRIVER, authProvider.getDriver());
-            settings.put(AvailableSettings.URL, authProvider.getUrl());
-            settings.put(AvailableSettings.USER, user);
-            settings.put(AvailableSettings.PASS, password);
+            settings.put(AvailableSettings.JAKARTA_JDBC_DRIVER, authProvider.getDriver());
+            settings.put(AvailableSettings.JAKARTA_JDBC_URL, authProvider.getUrl());
+            settings.put(AvailableSettings.JAKARTA_JDBC_USER, user);
+            settings.put(AvailableSettings.JAKARTA_JDBC_PASSWORD, password);
             settings.put(AvailableSettings.DIALECT, authProvider.getDialect());
             settings.put(AvailableSettings.GLOBALLY_QUOTED_IDENTIFIERS, "true");
             settings.put(AvailableSettings.HBM2DDL_AUTO, "none");

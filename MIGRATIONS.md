@@ -86,7 +86,8 @@ Open the generated file before committing. It has up to three sections:
   EXISTS` + `ADD CONSTRAINT`, so re-applying is safe. This matters: without it, adding
   an enum constant works everywhere in dev and then fails every production INSERT
   carrying the new value, because `validate` never repairs CHECK constraints.
-- **DESTRUCTIVE — commented out on purpose** — dropped tables/columns and type changes.
+- **DESTRUCTIVE — commented out on purpose** — dropped tables/columns and type changes
+  (including a changed length or precision, which can truncate or round stored values).
   These are never emitted live, because a machine cannot tell a removal from a rename,
   and dropping a column destroys data irreversibly. Read each line and uncomment what
   you actually mean.
@@ -114,10 +115,11 @@ migrate apply     # run every pending migration, in version order
 `apply` runs `verify` first and refuses if anything is wrong (`--force` overrides, if
 you understand the consequences). Each migration runs in its own transaction together
 with its history row, so a failure cannot leave a script half-recorded. On PostgreSQL
-and H2 the migration's own statements roll back too; MySQL/MariaDB commit DDL
+the migration's own statements roll back too; MySQL, MariaDB and H2 commit DDL
 implicitly, so a mid-file failure there can leave partial DDL applied.
 
-`apply --dry-run` lists what would run without touching anything.
+`apply --dry-run` lists what would run without applying anything (it still creates the
+empty history table if it does not exist yet).
 
 ## Command reference
 
@@ -150,6 +152,10 @@ migrations into it — there are none yet. Establish a starting point once:
 migrate baseline        # writes V1__baseline.sql and records it as applied
 ```
 
+If `V1__baseline.sql` is already committed (another database was adopted at the same
+point), it is recorded as is and never rewritten; `baseline` refuses a version that
+another migration file already uses.
+
 The snapshot is **not executed** — it documents the schema as it already stands. From
 then on, every change goes through the normal `diff` → `apply` loop, and a fresh
 environment (a new developer's machine, a test database) can be built from V1 upward.
@@ -177,8 +183,14 @@ nobody changes an entity without generating the migration:
 migrate diff ci_check --shadow-url $SCRATCH_URL --dry-run
 ```
 
-"No differences" (exit 0 with no generated SQL) means the committed migrations produce
-exactly the schema the entity model expects. Any output means a migration is missing.
+The command exits 0 either way, so check its output: a `No differences` line means the
+committed migrations produce the schema the entity model expects (within what the diff
+detects — see *Known limitations*); anything else means a migration is missing. For
+example:
+
+```
+migrate diff ci_check --shadow-url $SCRATCH_URL --dry-run | grep -q "No differences"
+```
 
 ## Safety model, in one place
 
@@ -189,14 +201,26 @@ exactly the schema the entity model expects. Any output means a migration is mis
   an already-applied file is reported by `verify` and blocks `apply`.
 - A migration numbered before something already applied is reported as out-of-order —
   it would silently be skipped on databases that are ahead.
+- Two files with the same version are reported by `verify` and block `apply`, unless both
+  are already recorded (by filename). With the same spelling (`V7__a.sql` and `V7__b.sql`)
+  only one of them can ever be recorded: once one is applied, the other would be skipped
+  for good. With different spellings (`V1` and `V01`) both are applied, in an order that
+  depends on the spelling. Renumber the pending file.
 - The history table (`architect_schema_history`) is created automatically and never
-  dropped by the tooling.
+  dropped by the CLI. `MigrationManager.clearDatabase` (the GUI's Clear tab) drops every
+  table, the history table included.
 
 ## Known limitations
 
 - **Enum CHECK constraints are PostgreSQL-only.** Other dialects get an empty section.
-- **Type-change suggestions use PostgreSQL syntax** (`ALTER COLUMN ... TYPE ...`).
-  They are commented out; adapt them if you run MySQL/MariaDB.
+- **Destructive suggestions use PostgreSQL syntax** (`DROP ... CASCADE`,
+  `ALTER COLUMN ... TYPE ...`), except length/precision changes, which come from Hibernate
+  in the dialect's own syntax. Identifiers are quoted for the dialect (backticks on
+  MySQL/MariaDB). They are commented out; adapt them if you run MySQL/MariaDB.
+- **Not detected:** nullability changes, and indexes, unique keys or foreign keys removed
+  from the model. Write those migrations by hand.
+- **Statements that cannot run inside a transaction** (PostgreSQL `CREATE INDEX
+  CONCURRENTLY`, `VACUUM`) cannot be applied: every migration runs in one transaction.
 - **Sequences are not diffed for removal.** A sequence left behind by a dropped
   entity is harmless but lingers; drop it by hand if you care.
 - **The shadow database must already exist.** The tool empties it; it does not create it.

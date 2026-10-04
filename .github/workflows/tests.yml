@@ -12,7 +12,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18
         env:
           POSTGRES_USER: architect
           POSTGRES_PASSWORD: architect
@@ -26,7 +26,7 @@ jobs:
           --health-retries 5
 
       redis:
-        image: redis:7
+        image: redis:8
         ports:
           - 6380:6379
         options: >-
@@ -36,31 +36,20 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'temurin'
-
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-
+          cache: gradle
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Configure Redis password
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq redis-tools
-          redis-cli -h localhost -p 6380 CONFIG SET requirepass architect
+        run: docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET requirepass architect
 
       - name: Run tests
         env:
@@ -76,7 +65,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-report
           path: build/reports/tests/test/

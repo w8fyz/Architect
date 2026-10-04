@@ -34,40 +34,49 @@ public class QueryBuilder<T> {
         this.repository = repository;
     }
 
+    /**
+     * Checked when added, so a builder never holds an unknown field: field names are written into
+     * the HQL as they are, and the cache evaluates conditions in memory by name.
+     */
+    private String field(String name) {
+        repository.validateFieldName(name);
+        return name;
+    }
+
     // --- WHERE clauses ---
 
     public QueryBuilder<T> where(String field, Object value) {
-        conditions.add(new Condition(field, Operator.EQ, value));
+        conditions.add(new Condition(field(field), Operator.EQ, value));
         return this;
     }
 
     public QueryBuilder<T> where(String field, Operator operator, Object value) {
-        conditions.add(new Condition(field, operator, value));
+        conditions.add(new Condition(field(field), operator, value));
         return this;
     }
 
     public QueryBuilder<T> whereLike(String field, String pattern) {
-        conditions.add(new Condition(field, Operator.LIKE, pattern));
+        conditions.add(new Condition(field(field), Operator.LIKE, pattern));
         return this;
     }
 
     public QueryBuilder<T> whereIn(String field, Collection<?> values) {
-        conditions.add(new Condition(field, Operator.IN, new ArrayList<>(values)));
+        conditions.add(new Condition(field(field), Operator.IN, new ArrayList<>(values)));
         return this;
     }
 
     public QueryBuilder<T> whereNotIn(String field, Collection<?> values) {
-        conditions.add(new Condition(field, Operator.NOT_IN, new ArrayList<>(values)));
+        conditions.add(new Condition(field(field), Operator.NOT_IN, new ArrayList<>(values)));
         return this;
     }
 
     public QueryBuilder<T> whereNull(String field) {
-        conditions.add(new Condition(field, Operator.IS_NULL, null));
+        conditions.add(new Condition(field(field), Operator.IS_NULL, null));
         return this;
     }
 
     public QueryBuilder<T> whereNotNull(String field) {
-        conditions.add(new Condition(field, Operator.IS_NOT_NULL, null));
+        conditions.add(new Condition(field(field), Operator.IS_NOT_NULL, null));
         return this;
     }
 
@@ -94,12 +103,12 @@ public class QueryBuilder<T> {
     // --- ORDER BY ---
 
     public QueryBuilder<T> orderBy(String field) {
-        orderBys.add(new OrderBy(field, SortOrder.ASC));
+        orderBys.add(new OrderBy(field(field), SortOrder.ASC));
         return this;
     }
 
     public QueryBuilder<T> orderBy(String field, SortOrder order) {
-        orderBys.add(new OrderBy(field, order));
+        orderBys.add(new OrderBy(field(field), order));
         return this;
     }
 
@@ -120,10 +129,18 @@ public class QueryBuilder<T> {
     // --- TERMINAL OPERATIONS (sync) ---
 
     public List<T> findAll() {
+        // Not passed on: the repositories treat a limit of 0 as "no limit".
+        if (limit == 0) {
+            return new ArrayList<>();
+        }
         return repository.executeQuery(this);
     }
 
     public T findFirst() {
+        // Like findAll(): a limit of 0 returns no row.
+        if (limit == 0) {
+            return null;
+        }
         List<T> results = repository.executeQueryWithLimit(this, 1);
         return results.isEmpty() ? null : results.get(0);
     }

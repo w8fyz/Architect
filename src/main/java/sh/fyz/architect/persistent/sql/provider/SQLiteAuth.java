@@ -9,7 +9,9 @@ import java.util.regex.Pattern;
 
 public class SQLiteAuth extends SQLAuthProvider {
 
-    private static final Pattern URL_SCHEME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.\\-]*:");
+    // At least two characters, so that a Windows drive letter ("C:\\data\\app.db") is not taken
+    // for a scheme.
+    private static final Pattern URL_SCHEME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.\\-]+:");
 
     private final String databasePath;
 
@@ -25,7 +27,8 @@ public class SQLiteAuth extends SQLAuthProvider {
         if (path == null || path.isBlank()) {
             throw new IllegalArgumentException("Invalid database path: must not be null or blank");
         }
-        if (path.contains(";") || path.contains("\u0000")) {
+        // '?' starts sqlite-jdbc's URL parameters (pragmas, open mode...).
+        if (path.contains(";") || path.contains("?") || path.contains("\u0000")) {
             throw new IllegalArgumentException("Invalid database path: illegal character");
         }
         if (URL_SCHEME.matcher(path).find()) {
@@ -42,9 +45,14 @@ public class SQLiteAuth extends SQLAuthProvider {
         }
     }
 
+    /**
+     * Hibernate ships no SQLite dialect in {@code hibernate-core}; it lives in
+     * {@code org.hibernate.orm:hibernate-community-dialects} (same version as hibernate-core),
+     * which must be on the classpath together with the {@code org.xerial:sqlite-jdbc} driver.
+     */
     @Override
     public String getDialect() {
-        return "org.hibernate.dialect.SQLiteDialect";
+        return "org.hibernate.community.dialect.SQLiteDialect";
     }
 
     @Override

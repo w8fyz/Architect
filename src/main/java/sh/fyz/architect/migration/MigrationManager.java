@@ -9,7 +9,6 @@ import sh.fyz.architect.persistent.sql.SQLAuthProvider;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -132,55 +131,9 @@ public class MigrationManager {
 
     private void doClearDatabase() {
         try (Session session = SessionManager.get().getSession()) {
-            session.doWork(this::doClear);
+            session.doWork(connection -> SqlDialect.dropAll(connection, dialect, false));
         }
         LOG.info("Database cleared successfully");
-    }
-
-    private void doClear(Connection connection) throws SQLException {
-        boolean wasAutoCommit = connection.getAutoCommit();
-        try {
-            connection.setAutoCommit(false);
-            String dialectLower = dialect.toLowerCase();
-            try (Statement stmt = connection.createStatement()) {
-                if (dialectLower.contains("postgresql")) {
-                    stmt.execute("DROP SCHEMA public CASCADE");
-                    stmt.execute("CREATE SCHEMA public");
-                } else if (dialectLower.contains("mysql") || dialectLower.contains("mariadb")) {
-                    stmt.execute("SET FOREIGN_KEY_CHECKS = 0");
-                    List<String> tables = getTableNamesViaJdbc(connection);
-                    for (String table : tables) {
-                        stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
-                    }
-                    stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
-                } else if (dialectLower.contains("h2")) {
-                    stmt.execute("DROP ALL OBJECTS");
-                } else {
-                    List<String> tables = getTableNamesViaJdbc(connection);
-                    for (String table : tables) {
-                        stmt.execute("DROP TABLE IF EXISTS \"" + table + "\" CASCADE");
-                    }
-                }
-            }
-            connection.commit();
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(wasAutoCommit);
-        }
-    }
-
-    private List<String> getTableNamesViaJdbc(Connection connection) throws SQLException {
-        List<String> tables = new ArrayList<>();
-        var meta = connection.getMetaData();
-        String schema = dialect.toLowerCase().contains("postgresql") ? "public" : null;
-        try (var rs = meta.getTables(null, schema, null, new String[]{"TABLE"})) {
-            while (rs.next()) {
-                tables.add(rs.getString("TABLE_NAME"));
-            }
-        }
-        return tables;
     }
 
     public List<String> listMigrations() {
@@ -256,6 +209,11 @@ public class MigrationManager {
      * single transaction. Holds no instance state.</p>
      */
     static List<String> parseSqlStatements(String sql) {
+        // A UTF-8 byte order mark (Windows editors) survives trim() and would be sent to the
+        // database as part of the first statement.
+        if (sql.startsWith("\uFEFF")) {
+            sql = sql.substring(1);
+        }
         List<String> statements = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean inSingleQuote = false;
@@ -290,6 +248,8 @@ public class MigrationManager {
                 if (c == '*' && next == '/') {
                     inBlockComment = false;
                     i++;
+                    // The comment separated two tokens: DROP TABLE/*x*/foo must not become DROP TABLEfoo.
+                    current.append(' ');
                 }
                 continue;
             }
@@ -310,7 +270,9 @@ public class MigrationManager {
                 inSingleQuote = !inSingleQuote;
             } else if (c == '"' && !inSingleQuote) {
                 inDoubleQuote = !inDoubleQuote;
-            } else if (c == '$' && !inSingleQuote && !inDoubleQuote) {
+            } else if (c == '$' && !inSingleQuote && !inDoubleQuote
+                    && (i == 0 || !isIdentifierChar(sql.charAt(i - 1)))) {
+                // Inside an identifier (price$usd$) a '$' is part of the name, not a quote.
                 String tag = tryReadDollarTag(sql, i);
                 if (tag != null) {
                     current.append(tag);
@@ -352,11 +314,17 @@ public class MigrationManager {
             if (c == '$') {
                 return sql.substring(start, i + 1);
             }
-            if (!(Character.isLetterOrDigit(c) || c == '_')) {
+            // PostgreSQL tags follow identifier rules: they cannot start with a digit ($1 is a
+            // positional parameter).
+            if (!(Character.isLetter(c) || c == '_' || (i > start + 1 && Character.isDigit(c)))) {
                 return null;
             }
             i++;
         }
         return null;
+    }
+
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 }

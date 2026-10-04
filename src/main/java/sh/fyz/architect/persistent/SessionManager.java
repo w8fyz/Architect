@@ -22,6 +22,9 @@ import java.util.logging.Logger;
 public class SessionManager {
 
     private static final Logger LOG = Logger.getLogger(SessionManager.class.getName());
+    // java.util.logging only keeps weak references to loggers: without this field the level set
+    // below can be garbage collected along with the logger, and Hibernate's INFO output returns.
+    private static final Logger HIBERNATE_LOG = Logger.getLogger("org.hibernate");
     private static volatile SessionManager instance;
     private static final Object LOCK = new Object();
 
@@ -36,7 +39,6 @@ public class SessionManager {
             String user,
             String password,
             int poolSize,
-            int threadPoolSize,
             String hbm2ddlAuto
     ) {
         String jdbcUrl = authProvider != null ? authProvider.getUrl() : null;
@@ -44,16 +46,17 @@ public class SessionManager {
             this.authProvider = authProvider;
             if (authProvider != null) {
                 Properties settings = new Properties();
-                settings.put(Environment.DRIVER, authProvider.getDriver());
-                settings.put(Environment.URL, jdbcUrl);
-                settings.put(Environment.USER, user);
-                settings.put(Environment.PASS, password);
+                settings.put(Environment.JAKARTA_JDBC_DRIVER, authProvider.getDriver());
+                settings.put(Environment.JAKARTA_JDBC_URL, jdbcUrl);
+                // Properties rejects null values: a password-less login (or SQLite) leaves them unset.
+                if (user != null) settings.put(Environment.JAKARTA_JDBC_USER, user);
+                if (password != null) settings.put(Environment.JAKARTA_JDBC_PASSWORD, password);
                 settings.put(Environment.DIALECT, authProvider.getDialect());
                 settings.put(Environment.HBM2DDL_AUTO, hbm2ddlAuto != null ? hbm2ddlAuto : "update");
                 settings.put(Environment.SHOW_SQL, "false");
                 settings.put(Environment.GLOBALLY_QUOTED_IDENTIFIERS, "true");
 
-                Logger.getLogger("org.hibernate").setLevel(Level.WARNING);
+                HIBERNATE_LOG.setLevel(Level.WARNING);
 
                 int maxPool = Math.max(1, poolSize);
                 int minIdle = Math.max(1, maxPool / 4);
@@ -64,6 +67,7 @@ public class SessionManager {
                 settings.put("hibernate.hikari.connectionTimeout", "30000");
                 settings.put("hibernate.hikari.keepaliveTime", "300000");
                 settings.put("hibernate.hikari.leakDetectionThreshold", "60000");
+                settings.put("hibernate.hikari.poolName", "architect");
 
                 settings.put("hibernate.jdbc.batch_size", "20");
                 settings.put("hibernate.order_inserts", "true");
@@ -71,6 +75,10 @@ public class SessionManager {
 
                 settings.put("hibernate.jdbc.fetch_size", "50");
                 settings.put("hibernate.default_batch_fetch_size", "16");
+
+                // Pads IN-list parameters to the next power of two so whereIn() queries of
+                // varying sizes share a handful of SQL strings (and cached plans) instead of one each.
+                settings.put("hibernate.query.in_clause_parameter_padding", "true");
 
                 settings.put("hibernate.generate_statistics", "false");
 
@@ -135,6 +143,11 @@ public class SessionManager {
         return authProvider;
     }
 
+    /**
+     * @deprecated {@code threadPoolSize} is ignored: async calls run on virtual threads. Use
+     *             {@link #initialize(List, SQLAuthProvider, String, String, int, String)}.
+     */
+    @Deprecated
     public static void initialize(
             List<Class<? extends IdentifiableEntity>> entityClasses,
             SQLAuthProvider authProvider,
@@ -144,9 +157,20 @@ public class SessionManager {
             int threadPoolSize,
             String hbm2ddlAuto
     ) {
+        initialize(entityClasses, authProvider, user, password, poolSize, hbm2ddlAuto);
+    }
+
+    public static void initialize(
+            List<Class<? extends IdentifiableEntity>> entityClasses,
+            SQLAuthProvider authProvider,
+            String user,
+            String password,
+            int poolSize,
+            String hbm2ddlAuto
+    ) {
         synchronized (LOCK) {
             if (instance == null) {
-                instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, threadPoolSize, hbm2ddlAuto);
+                instance = new SessionManager(entityClasses, authProvider, user, password, poolSize, hbm2ddlAuto);
             } else {
                 throw new IllegalStateException("SessionManager is already initialized!");
             }
@@ -156,8 +180,12 @@ public class SessionManager {
     public static void reset() {
         synchronized (LOCK) {
             if (instance != null) {
-                instance.close();
-                instance = null;
+                try {
+                    instance.close();
+                } finally {
+                    // Cleared even if closing failed, so that a later initialize() is not refused.
+                    instance = null;
+                }
             }
         }
     }
@@ -188,10 +216,12 @@ public class SessionManager {
         return sessionFactory.openSession();
     }
 
-    public void close() {
-        if (sessionFactory != null) {
-            sessionFactory.close();
-        }
+    /**
+     * Refuses new async repository calls and waits up to 5 seconds for those queued or running,
+     * then interrupts the rest. {@code Architect.stop()} calls it before shutting Redis down,
+     * which the async calls of cached repositories need too.
+     */
+    public void awaitAsyncCalls() {
         threadPool.shutdown();
         try {
             if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -200,6 +230,18 @@ public class SessionManager {
         } catch (InterruptedException e) {
             threadPool.shutdownNow();
             Thread.currentThread().interrupt();
+        }
+    }
+
+    public void close() {
+        // Async repository calls still queued or running need the SessionFactory: let them
+        // finish before closing it, instead of failing them (and losing their writes).
+        try {
+            awaitAsyncCalls();
+        } finally {
+            if (sessionFactory != null) {
+                sessionFactory.close();
+            }
         }
     }
 

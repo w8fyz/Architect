@@ -6,7 +6,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -76,9 +75,9 @@ public class ShadowDatabase {
     }
 
     /**
-     * The guard. Compares normalised JDBC URLs — query parameters stripped, case folded, default
-     * ports made explicit — so that a TLS flag, a trailing parameter or an omitted {@code :5432}
-     * cannot disguise the production database as a shadow.
+     * The guard. Compares normalised JDBC URLs — query parameters and H2 {@code ;} settings
+     * stripped, case folded, default ports made explicit — so that a TLS flag, a trailing
+     * parameter or an omitted {@code :5432} cannot disguise the production database as a shadow.
      */
     public void assertNotMainDatabase(String mainUrl) {
         if (mainUrl == null) {
@@ -95,7 +94,12 @@ public class ShadowDatabase {
 
     private static String normalise(String jdbcUrl) {
         String url = jdbcUrl.trim().toLowerCase(Locale.ROOT);
+        // Parameters start at '?' (PostgreSQL, MySQL, MariaDB) or at ';' (H2).
         int query = url.indexOf('?');
+        int settings = url.indexOf(';');
+        if (settings >= 0 && (query < 0 || settings < query)) {
+            query = settings;
+        }
         if (query >= 0) {
             url = url.substring(0, query);
         }
@@ -115,6 +119,9 @@ public class ShadowDatabase {
             defaultPort = 5432;
         } else if (url.startsWith("jdbc:mysql:") || url.startsWith("jdbc:mariadb:")) {
             defaultPort = 3306;
+        } else if (url.startsWith("jdbc:h2:tcp:") || url.startsWith("jdbc:h2:ssl:")) {
+            // H2Auth always spells the port out, a hand-written shadow URL may not.
+            defaultPort = 9092;
         } else {
             return url;
         }
@@ -157,37 +164,7 @@ public class ShadowDatabase {
 
     /** Drops everything. PostgreSQL gets the schema recreated; other dialects are dropped table by table. */
     public void clear() {
-        withConnection(connection -> {
-            boolean wasAutoCommit = connection.getAutoCommit();
-            try {
-                connection.setAutoCommit(false);
-                String dialect = shadow.getDialect().toLowerCase(Locale.ROOT);
-                try (Statement stmt = connection.createStatement()) {
-                    if (dialect.contains("postgresql")) {
-                        stmt.execute("DROP SCHEMA public CASCADE");
-                        stmt.execute("CREATE SCHEMA public");
-                    } else if (dialect.contains("mysql") || dialect.contains("mariadb")) {
-                        stmt.execute("SET FOREIGN_KEY_CHECKS = 0");
-                        for (String table : tableNames(connection)) {
-                            stmt.execute("DROP TABLE IF EXISTS `" + table + "`");
-                        }
-                        stmt.execute("SET FOREIGN_KEY_CHECKS = 1");
-                    } else if (dialect.contains("h2")) {
-                        stmt.execute("DROP ALL OBJECTS");
-                    } else {
-                        for (String table : tableNames(connection)) {
-                            stmt.execute("DROP TABLE IF EXISTS \"" + table + "\" CASCADE");
-                        }
-                    }
-                }
-                connection.commit();
-            } catch (SQLException e) {
-                connection.rollback();
-                throw e;
-            } finally {
-                connection.setAutoCommit(wasAutoCommit);
-            }
-        });
+        withConnection(connection -> SqlDialect.dropAll(connection, shadow.getDialect(), true));
     }
 
     private void execute(List<String> statements, String label) {
@@ -213,16 +190,6 @@ public class ShadowDatabase {
                 connection.setAutoCommit(wasAutoCommit);
             }
         });
-    }
-
-    private List<String> tableNames(Connection connection) throws SQLException {
-        List<String> tables = new ArrayList<>();
-        try (ResultSet rs = connection.getMetaData().getTables(null, null, null, new String[]{"TABLE"})) {
-            while (rs.next()) {
-                tables.add(rs.getString("TABLE_NAME"));
-            }
-        }
-        return tables;
     }
 
     private interface Work {

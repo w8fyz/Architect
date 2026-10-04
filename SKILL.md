@@ -23,8 +23,8 @@ src/main/java/sh/fyz/architect/
 │   ├── SessionManager.java                 # Hibernate singleton
 │   ├── EnumCheckConstraintSynchronizer.java # Syncs enum CHECK constraints on PostgreSQL
 │   └── sql/
-│       ├── SQLAuthProvider.java            # Abstract JDBC provider (validates host/database)
-│       ├── TlsMode.java                    # DISABLE / PREFER / REQUIRE / VERIFY_CA / VERIFY_FULL
+│       ├── SQLAuthProvider.java            # Abstract JDBC provider (host/database only checked non-blank)
+│       ├── TlsMode.java                    # DRIVER_DEFAULT (default) / DISABLE / PREFER / REQUIRE / VERIFY_CA / VERIFY_FULL
 │       └── provider/                       # H2, MariaDB, MySQL, PostgreSQL, SQLite
 ├── migration/
 │   ├── MigrationManager.java              # Public API: create, execute, clear, list, inspect
@@ -33,7 +33,7 @@ src/main/java/sh/fyz/architect/
 │   └── MigrationToolGUI.java             # Swing GUI (dev tool, not for programmatic use)
 ├── cache/
 │   ├── RedisCredentials.java               # Redis config value object
-│   ├── RedisManager.java                   # Jedis singleton, keys prefixed architect:
+│   ├── RedisManager.java                   # Redis client (Jedis RedisClient) singleton, keys prefixed architect:
 │   ├── RedisQueueActionPool.java           # Async flush queue for cached repos
 │   └── EntityChannelPubSub.java            # Pub/sub per entity type
 └── repositories/
@@ -70,7 +70,7 @@ Architect architect = new Architect()
     .setReceiver(true)
     .setDatabaseCredentials(new DatabaseCredentials(
         new PostgreSQLAuth("localhost", 5432, "mydb"),
-        "user", "password", 10, 10, "update"
+        "user", "password", 10, "update"
     ));
 architect.addEntityClass(User.class);
 architect.start();
@@ -79,10 +79,11 @@ architect.stop();
 ```
 
 `DatabaseCredentials` overloads:
-- `(provider, user, pass, poolSize)` — defaults: threadPool=10, hbm2ddl="update"
-- `(provider, user, pass, poolSize, threadPoolSize, hbm2ddlAuto)`
+- `(provider, user, pass, poolSize)` — default hbm2ddl="update"
+- `(provider, user, pass, poolSize, hbm2ddlAuto)`
+- the overloads with a `threadPoolSize` are deprecated: it is ignored (async calls run on virtual threads)
 
-SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are validated against `[A-Za-z0-9._-]`; SQLite paths are normalized.
+SQL providers: `PostgreSQLAuth`, `MySQLAuth`, `MariaDBAuth`, `H2Auth`, `SQLiteAuth`. Hostnames/databases are only checked for being non-blank and go into the JDBC URL as-is (trusted configuration only); SQLite paths are normalized.
 
 Optional TLS via `withTls(TlsMode)` (network providers only — SQLite throws `UnsupportedOperationException`):
 
@@ -238,10 +239,11 @@ String content = manager.readMigrationContent("v1_init");  // raw SQL content
 manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION); // "CONFIRM_DROP_ALL"
 ```
 
-The confirmation token is required (raises `IllegalArgumentException` otherwise). The no-arg overload is `@Deprecated` and logs a warning. Drops all tables. Strategy varies by dialect:
+The confirmation token is required (raises `IllegalArgumentException` otherwise). The no-arg overload is `@Deprecated` and logs a warning. Drops every table, view and sequence of the application's schema or database, leaving other schemas and databases alone. Strategy varies by dialect:
 - PostgreSQL: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
-- MySQL/MariaDB: disables FK checks, drops each table, re-enables FK checks
-- H2: `DROP ALL OBJECTS`
+- MySQL/MariaDB: disables FK checks, drops each view, table, (MariaDB) sequence, stored function and procedure, re-enables FK checks
+- H2: drops each view, synonym, table (global temporary ones included), sequence, domain, alias and constant of the current schema (not `DROP ALL OBJECTS`, which drops every schema)
+- SQLite: drops each view and table (SQLite has no `CASCADE`)
 
 #### Inspect the database
 
@@ -272,12 +274,15 @@ Migration filenames are validated and resolved against the migration directory; 
 
 ## Key Rules
 
-- Field names in `where()` and `orderBy()` are validated against the entity class; invalid names throw `IllegalArgumentException`.
+- Field names in `where()` and `orderBy()` are validated against the entity class when added; invalid names throw `IllegalArgumentException`.
 - `query().delete()` without any condition throws `IllegalStateException`.
-- `limit(-1)` or `offset(-1)` throw `IllegalArgumentException`.
-- Always call `architect.stop()` on shutdown.
+- `limit(-1)` or `offset(-1)` throw `IllegalArgumentException`; `limit(0)` returns no row (`findAll()` empty, `findFirst()` null).
+- `delete(entity)` on an entity whose row is already gone, or that was never saved, does nothing.
+- Cached and relay repositories are last-writer-wins for `@Version` entities (no optimistic-lock protection); use `GenericRepository` where concurrent updates must be detected.
+- On a receiver, a cached repository's `query().delete()` flushes its queued writes first and throws `IllegalStateException` if some still wait to be retried.
+- Always call `architect.stop()` on shutdown. After `stop()` / `start()`, existing repositories (cached and relay included) keep working.
 - `GenericCachedRepository.save()` on a new entity (id=null) is only allowed on receiver instances.
-- `architect.start()` is idempotent — calling it twice is a no-op. If DB initialization fails after Redis was set up, Redis is rolled back automatically.
+- `architect.start()` is idempotent — calling it twice is a no-op. It initializes the database, then Redis; if a step fails, those already done are rolled back.
 - `SessionManager.getSession()` rejects calls on a closed `SessionFactory` with a clear `IllegalStateException`.
 
 ## Installation
@@ -286,7 +291,7 @@ Migration filenames are validated and resolved against the migration directory; 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.0'
+    implementation 'sh.fyz:Architect:3.0.0'
 }
 ```
 
@@ -296,6 +301,6 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.0</version>
+    <version>3.0.0</version>
 </dependency>
 ```

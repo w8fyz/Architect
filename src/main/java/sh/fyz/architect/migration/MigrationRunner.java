@@ -18,9 +18,12 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -34,18 +37,18 @@ import java.util.logging.Logger;
  * {@code hbm2ddl=update}.</p>
  *
  * <h2>What this is not</h2>
- * <p>There is no diffing. {@link MigrationManager#createMigration(String)} emits a
+ * <p>No diffing happens here. {@link MigrationManager#createMigration(String)} emits a
  * full {@code CREATE TABLE} snapshot of the current entity model, which is only
  * applicable to an empty database — useful as a baseline, not as an incremental
- * step. Every migration after the baseline is hand-written SQL. Nothing here
- * computes the delta between two versions of an entity model.</p>
+ * step. Incremental migrations are computed by {@link SchemaDiff} (the CLI's
+ * {@code diff} command) or written by hand.</p>
  *
  * <h2>Atomicity</h2>
  * <p>Each migration's statements and its history row are written in one
  * transaction, so a failure cannot leave a script half-applied but recorded, nor
  * applied but unrecorded. That guarantee is only as strong as the database's
- * transactional DDL: it holds on PostgreSQL and H2, and does not on MySQL or
- * MariaDB, where DDL commits implicitly.</p>
+ * transactional DDL: it holds on PostgreSQL, and does not on MySQL, MariaDB or
+ * H2, where DDL commits implicitly.</p>
  */
 public class MigrationRunner {
 
@@ -198,14 +201,47 @@ public class MigrationRunner {
      */
     public List<Problem> verify() {
         List<Problem> problems = new ArrayList<>();
-        Map<String, Available> onDisk = new LinkedHashMap<>();
-        for (Available a : available()) {
-            onDisk.put(a.version().raw(), a);
+        // History is keyed by the raw version. Two files with the same raw version (V7__a /
+        // V7__b) can never both be recorded: once one is applied, the other is skipped for good.
+        // Two that only compare equal (V1 / V01) are both recorded, but in an order that depends
+        // on their spelling. Groups whose files are all recorded are history, not a hazard:
+        // renaming either file now would only trade this report for a missing-file one. A file
+        // counts as recorded by its filename, or by its raw version when no other file has that
+        // raw version (an applied file renamed since, which nothing else reports either).
+        List<Applied> history = applied();
+        Set<String> appliedFiles = new HashSet<>();
+        Set<String> appliedVersions = new HashSet<>();
+        for (Applied applied : history) {
+            appliedFiles.add(applied.filename());
+            appliedVersions.add(applied.version());
+        }
+        List<Available> files = available();
+        Map<String, Available> byFilename = new HashMap<>();
+        Map<String, Available> byRaw = new LinkedHashMap<>();
+        Map<String, Integer> rawCounts = new HashMap<>();
+        for (Available a : files) {
+            byFilename.put(a.filename(), a);
+            byRaw.putIfAbsent(a.version().raw(), a);
+            rawCounts.merge(a.version().raw(), 1, Integer::sum);
+        }
+        Map<List<Long>, Available> byNumericVersion = new LinkedHashMap<>();
+        for (Available a : files) {
+            Available first = byNumericVersion.putIfAbsent(numericKey(a.version()), a);
+            if (first != null && !(isRecorded(first, appliedFiles, appliedVersions, rawCounts)
+                    && isRecorded(a, appliedFiles, appliedVersions, rawCounts))) {
+                problems.add(new Problem(a.version().raw(),
+                        "duplicate version: " + first.filename() + " and " + a.filename()
+                                + " have the same version; renumber one of them"));
+            }
         }
 
         MigrationVersion highestApplied = null;
-        for (Applied applied : applied()) {
-            Available disk = onDisk.get(applied.version());
+        for (Applied applied : history) {
+            // By filename first: of two files with the same raw version, the one applied.
+            Available disk = byFilename.get(applied.filename());
+            if (disk == null || !disk.version().raw().equals(applied.version())) {
+                disk = byRaw.get(applied.version());
+            }
             if (disk == null) {
                 problems.add(new Problem(applied.version(),
                         "applied on " + applied.filename() + " but that file is missing from "
@@ -259,7 +295,8 @@ public class MigrationRunner {
      * Stops at the first failure; migrations already applied in this run stay
      * applied, since each is its own transaction.
      *
-     * @param dryRun when true, reports what would run and touches nothing
+     * @param dryRun when true, reports what would run without applying it (the history
+     *               table is still created if absent)
      * @return the migrations applied (or that would be, when {@code dryRun})
      */
     public List<Available> apply(boolean dryRun) {
@@ -313,19 +350,54 @@ public class MigrationRunner {
                             + "Baselining is only for a database that has never been migrated.");
         }
         String name = "V" + version + "__baseline";
-        Path file = manager.createMigration(name);
-        String filename = file.getFileName().toString();
-
-        MigrationVersion parsed = MigrationVersion.parse(filename);
-        if (parsed == null) {
-            throw new IllegalStateException("Generated baseline filename is not parseable: " + filename);
+        // Checked before anything is written: a committed migration file must never be rewritten,
+        // since its recorded checksum would then fail verify() on every database that ran it.
+        MigrationVersion target = MigrationVersion.parse(name + ".sql");
+        if (target == null) {
+            throw new IllegalArgumentException("Invalid baseline version: " + version);
         }
-        Available baseline = new Available(parsed, filename, checksum(read(filename)));
+        Available existing = null;
+        for (Available file : available()) {
+            if (!sameNumericVersion(file.version(), target)) {
+                continue;
+            }
+            // Matched by version and description, not by filename: createMigration writes
+            // "1.5" as V1_5__baseline.sql.
+            if (!target.description().equals(file.version().description())) {
+                throw new IllegalStateException("Cannot baseline as version " + version + ": "
+                        + file.filename() + " already uses it.");
+            }
+            existing = file;
+        }
+        // Another database adopted at the same point: the snapshot already exists, record it as is.
+        Available baseline = existing;
+        if (baseline == null) {
+            String filename = manager.createMigration(name).getFileName().toString();
+            MigrationVersion parsed = MigrationVersion.parse(filename);
+            if (parsed == null) {
+                throw new IllegalStateException("Generated baseline filename is not parseable: " + filename);
+            }
+            baseline = new Available(parsed, filename, checksum(read(filename)));
+        }
+        Available recorded = baseline;
 
         long now = System.currentTimeMillis();
-        withTransaction(connection -> record(connection, baseline, now));
-        LOG.info("Baseline recorded (not executed): " + filename);
-        return baseline;
+        withTransaction(connection -> record(connection, recorded, now));
+        LOG.info("Baseline recorded (not executed): " + recorded.filename());
+        return recorded;
+    }
+
+    /** V1 and V1.0 or V01: the same version spelled differently. */
+    private static boolean sameNumericVersion(MigrationVersion a, MigrationVersion b) {
+        int size = Math.max(a.segments().size(), b.segments().size());
+        for (int i = 0; i < size; i++) {
+            long x = i < a.segments().size() ? a.segments().get(i) : 0L;
+            long y = i < b.segments().size() ? b.segments().get(i) : 0L;
+            if (x != y) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ── History table ────────────────────────────────────────────────────────
@@ -373,6 +445,22 @@ public class MigrationRunner {
             out.put(a.version(), a);
         }
         return out;
+    }
+
+    /** Version segments without trailing zeros, so that V1, V01 and V1.0 compare equal. */
+    private static boolean isRecorded(Available file, Set<String> appliedFiles, Set<String> appliedVersions,
+                                      Map<String, Integer> rawCounts) {
+        String raw = file.version().raw();
+        return appliedFiles.contains(file.filename())
+                || (appliedVersions.contains(raw) && rawCounts.get(raw) == 1);
+    }
+
+        private static List<Long> numericKey(MigrationVersion version) {
+        List<Long> segments = new ArrayList<>(version.segments());
+        while (segments.size() > 1 && segments.get(segments.size() - 1) == 0L) {
+            segments.remove(segments.size() - 1);
+        }
+        return segments;
     }
 
     // ── Plumbing ─────────────────────────────────────────────────────────────

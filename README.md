@@ -5,7 +5,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 ## Requirements
 
 - **Java 21+**
-- A SQL database (PostgreSQL, MySQL, MariaDB, H2, SQLite)
+- A SQL database (PostgreSQL, MySQL, MariaDB, H2, SQLite) and its JDBC driver, which Architect does not bundle (e.g. `org.postgresql:postgresql`). SQLite also needs `org.hibernate.orm:hibernate-community-dialects` for its dialect.
 - Redis (optional, for caching and relay)
 
 ## Installation
@@ -14,7 +14,7 @@ A lightweight Java ORM framework built on top of Hibernate, with optional Redis 
 
 ```groovy
 dependencies {
-    implementation 'sh.fyz:Architect:2.2.0'
+    implementation 'sh.fyz:Architect:3.0.0'
 }
 ```
 
@@ -24,7 +24,7 @@ dependencies {
 <dependency>
     <groupId>sh.fyz</groupId>
     <artifactId>Architect</artifactId>
-    <version>2.2.0</version>
+    <version>3.0.0</version>
 </dependency>
 ```
 
@@ -100,7 +100,6 @@ architect.setDatabaseCredentials(new DatabaseCredentials(
     new PostgreSQLAuth("localhost", 5432, "mydb"),
     "user", "password",
     10,   // connection pool size
-    10,   // thread pool size
     "update" // hbm2ddl.auto strategy
 ));
 
@@ -126,7 +125,7 @@ architect.start();
 | `H2Auth` | `(host, port, database)` |
 | `SQLiteAuth` | `(databasePath)` |
 
-Hostname and database identifiers are validated against `[A-Za-z0-9._-]` to prevent JDBC URL injection. SQLite paths are normalized and reject URL schemes / illegal characters.
+Hostname and database are only checked for being non-blank (and the port for its range): they are concatenated into the JDBC URL as-is, so they must come from trusted configuration, never from user input. SQLite paths are normalized and reject URL schemes / illegal characters.
 
 #### TLS
 
@@ -137,19 +136,25 @@ new PostgreSQLAuth("db.example.com", 5432, "app").withTls(TlsMode.REQUIRE)
 new MySQLAuth("db.example.com", 3306, "app").withTls(TlsMode.VERIFY_FULL)
 ```
 
-`TlsMode` values: `DISABLE` (default, backwards-compatible), `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters.
+`TlsMode` values: `DRIVER_DEFAULT` (default), `DISABLE`, `PREFER`, `REQUIRE`, `VERIFY_CA`, `VERIFY_FULL`. Each provider translates the mode to the dialect-specific URL parameters. `DRIVER_DEFAULT` adds no parameter, so the driver decides: opportunistic TLS for PostgreSQL (`prefer`) and MySQL (`PREFERRED`), plaintext for MariaDB and H2. `DISABLE` forces plaintext everywhere. Dialect notes:
+
+- **MySQL**: the legacy `useSSL` options are used, which Connector/J 8.0+ maps to `sslMode` (Connector/J 5.1 reads them differently: it verifies the certificate whenever TLS is requested). With `DISABLE`, MySQL 8's default `caching_sha2_password` refuses a plaintext login ("Public Key Retrieval is not allowed") whenever the server has not cached the account's password yet, typically after a restart, unless the connection sets `serverRSAPublicKeyFile` or `allowPublicKeyRetrieval`, which `MySQLAuth` does not add (override its `getUrl()` if you need one).
+- **MariaDB**: the legacy `useSsl` options are used, which Connector/J 2.x and 3.x both understand (3.x logs a deprecation notice). There is no opportunistic mode, so `PREFER` requires TLS like `REQUIRE`.
+- **H2**: every mode other than `DRIVER_DEFAULT` and `DISABLE` uses `jdbc:h2:ssl://`, which checks the certificate chain against the JVM truststore but not the hostname — `VERIFY_FULL` behaves like `VERIFY_CA`.
 
 ### DatabaseCredentials
 
 ```java
-// Minimal (defaults: threadPoolSize=10, hbm2ddl="update")
+// Minimal (default hbm2ddl="update")
 new DatabaseCredentials(provider, user, password, poolSize)
 
 // Full control
-new DatabaseCredentials(provider, user, password, poolSize, threadPoolSize, hbm2ddlAuto)
+new DatabaseCredentials(provider, user, password, poolSize, hbm2ddlAuto)
 ```
 
-`hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"validate"`, `"none"`.
+Async calls run on virtual threads, so there is no thread pool to size: the older constructors taking a `threadPoolSize` are deprecated and ignore it.
+
+`hbm2ddlAuto` values: `"update"` (default), `"create"`, `"create-drop"`, `"create-only"`, `"validate"`, `"none"`.
 
 > **Production**: always use `"none"` and manage schema changes through the migration system below. `"update"` is convenient for development but is not safe to run against a live database.
 
@@ -162,6 +167,10 @@ new RedisCredentials("localhost", "password", 6379, 2000, 10, /* defaultTtlSecon
 ```
 
 Per-key TTL overrides are still possible via `RedisManager.get().setTTL(key, seconds)`.
+
+For direct Redis access, `RedisManager.get().getRedisClient()` returns the Jedis `RedisClient` Architect uses. Architect's own keys are prefixed `architect:`; the client does not add the prefix, so include it yourself.
+
+> **With a TTL, `GenericCachedRepository` queries can return partial results.** `all()`, `query()...findAll()` and `count()` treat a non-empty cache as the whole table, so once some keys have expired they answer from the entries that are left. Use a TTL only if you read cached entities by id, or use a plain `GenericRepository` for those queries.
 
 ## Repositories
 
@@ -185,6 +194,8 @@ users.allAsync(onSuccess, onError);
 users.deleteAsync(user, onSuccess, onError);
 ```
 
+`delete(entity)` does nothing when the entity's row is already gone (deleted elsewhere) or was never saved. A `@Version` entity whose version is behind its row's still fails with an optimistic-lock error.
+
 ### GenericCachedRepository
 
 Redis-first reads. Falls back to database on cache miss, then populates the cache. Writes are queued and flushed to the database periodically.
@@ -193,7 +204,11 @@ Redis-first reads. Falls back to database on cache miss, then populates the cach
 GenericCachedRepository<User> users = new GenericCachedRepository<>(User.class);
 ```
 
-Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache.
+Same API as `GenericRepository`. Automatically resolves `@ManyToOne`, `@OneToMany`, and `@OneToOne` relations from cache; on an instance with a database, related entities missing from Redis are read from it, in one query per entity type for the whole read. Lazy collections are loaded when an entity is read from the database, before it is cached. The cache is taken for the whole table by `all()` and `query()`: the receiver loads each table into it on the first use after its start (which clears Redis), keeping any row already cached since; other instances only load an empty cache, so a cache partly filled by another instance is trusted as is there.
+
+A queued write that the database rejects for the entity's own state (value too long, `NOT NULL`, `CHECK`) is dropped with a `SEVERE` log and the cache is refreshed from the database, so that it cannot block the writes queued after it; any other failure (foreign-key or unique constraint, related entity whose row no longer exists...) is retried for about 5 seconds first. Only when the database cannot process writes at all (connection lost, lock or statement timeout, deadlock, server overloaded or read-only during a failover) do queued writes wait for it indefinitely. `@Version` entities are last-writer-wins: a queued or relayed write takes the row's current version before it is merged. Writes land in Redis first and reach the database later, so concurrent updates overwrite each other before any version check could see them: cached and relay repositories offer no optimistic-lock protection. Use a plain `GenericRepository` where a concurrent update must be detected.
+
+On a receiver, `query()...delete()` first flushes the queued writes of the repository instance it is called on, since it matches rows on the cache but deletes them in the database. If some are still waiting to be retried (database unreachable, constraint waiting for another write), it throws `IllegalStateException` instead of deleting against rows the database does not have yet; call it again later.
 
 ### GenericRelayRepository
 
@@ -209,6 +224,8 @@ architect.start();
 GenericRelayRepository<User> users = new GenericRelayRepository<>(User.class);
 users.save(user); // sent via Redis pub/sub to the receiver
 ```
+
+A non-receiver can only save entities that already have an id; new entities are created on the receiver.
 
 ### Custom Repositories
 
@@ -358,6 +375,7 @@ query().orderBy("category").orderBy("name")    // multi-column
 ```java
 query().limit(10)                   // first 10 results
 query().limit(10).offset(20)       // page 3 (10 per page)
+query().limit(0)                    // no row: findAll() returns an empty list, findFirst() null
 
 query()
     .where("active", true)
@@ -438,7 +456,7 @@ Reads the `.sql` file and executes all statements in a single transaction with a
 manager.clearDatabase(MigrationManager.CLEAR_CONFIRMATION); // "CONFIRM_DROP_ALL"
 ```
 
-Drops all tables. Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies. The confirmation token is required to prevent accidental destructive calls. The no-argument overload is `@Deprecated` and logs a warning; it will be removed in a future major release.
+Drops every table, view and sequence of the application's schema (also the stored functions and procedures of a MySQL / MariaDB database, and H2's domains, aliases, constants and synonyms). Supports PostgreSQL, MySQL, MariaDB, H2, and SQLite with dialect-specific strategies. The confirmation token is required to prevent accidental destructive calls. The no-argument overload is `@Deprecated` and logs a warning; it will be removed in a future major release.
 
 ### Inspect the database
 
@@ -481,7 +499,23 @@ Always shut down Architect when your application stops:
 architect.stop();
 ```
 
-This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis.
+This closes Hibernate sessions, shuts down thread pools, and disconnects from Redis. It first waits (up to 5 seconds) for async calls still running, then flushes the cached writes still queued, and only then closes the database.
+
+`stop()` followed by `start()` works: repositories created before the restart keep working, and cached and relay repositories attach to the new Redis connection (flush queue, pub/sub subscription) on their own.
+
+## What's new in 3.0.0
+
+Breaking changes, check them before upgrading:
+
+- **Hibernate 7** (from 6.6) and **Jedis 8** (from 7.4). Both are exposed to applications: code using `SessionManager.get().getSession()` directly must follow the [Hibernate 7 migration guide](https://docs.hibernate.org/orm/7.0/migration-guide/) (`Session.save` / `update` / `saveOrUpdate` / `delete` are gone; merging a detached entity whose row was deleted now throws). `jedis` and `jackson-databind` are now `api` dependencies.
+- **`RedisManager`** exposes Jedis 8's `RedisClient` (`getRedisClient()`) instead of a `JedisPool`.
+- **TLS**: the default `TlsMode` is now `DRIVER_DEFAULT` instead of `DISABLE`, so MySQL uses TLS whenever the server offers it. An explicit `withTls(TlsMode.DISABLE)` on PostgreSQL now adds `sslmode=disable` (it used to add nothing, which meant the driver's `prefer`): a server that only accepts TLS connections refuses it.
+- **Cached / relay repositories** are last-writer-wins, `@Version` entities included: use `GenericRepository` where concurrent updates must be detected. `query()...delete()` on a receiver throws `IllegalStateException` while writes of that type are still waiting to be retried.
+- **`query().limit(0)`** returns no rows (it used to mean no limit).
+- **Migrations**: `verify` reports two files with the same version (`V7__a` / `V7__b`, `V1` / `V01`) and the CLI's `apply` refuses them, unless both are already recorded. Renumber the pending one.
+- **`threadPoolSize`** is deprecated and ignored: async calls run on virtual threads.
+
+See the pull request for the full list of fixes (cache consistency, lifecycle, migrations).
 
 ## What's new in 2.2.0
 

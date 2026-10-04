@@ -41,7 +41,7 @@ public class GenericCachedRepositoryTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(dbHost, dbPort, dbName),
-                dbUser, dbPass, 4, 4, "create-drop"
+                dbUser, dbPass, 4, "create-drop"
             ))
             .setRedisCredentials(new RedisCredentials(
                 redisHost, redisPass, redisPort, 2000, 10
@@ -69,11 +69,10 @@ public class GenericCachedRepositoryTest {
             tx.commit();
         }
 
-        try (var jedis = sh.fyz.architect.cache.RedisManager.get().getJedisPool().getResource()) {
-            var keys = jedis.keys("architect:Product:*");
-            if (!keys.isEmpty()) {
-                jedis.del(keys.toArray(new String[0]));
-            }
+        var redis = sh.fyz.architect.cache.RedisManager.get().getRedisClient();
+        var keys = redis.keys("architect:Product:*");
+        if (!keys.isEmpty()) {
+            redis.del(keys.toArray(new String[0]));
         }
     }
 
@@ -467,5 +466,40 @@ public class GenericCachedRepositoryTest {
             List<Product> all = repository.all();
             assertEquals(25, all.size());
         });
+    }
+
+    @Test
+    @Order(102)
+    @DisplayName("flushUpdates() - Une ligne supprimee en base ne bloque pas les autres ecritures")
+    void testFlushUpdatesSkipsDeletedRow() {
+        Product ghost = repository.save(new Product("Ghost", "Cat", 1.0, 1, true));
+        Product kept = repository.save(new Product("Kept", "Cat", 2.0, 1, true));
+        repository.flushUpdates();
+
+        try (var session = sh.fyz.architect.persistent.SessionManager.get().getSession()) {
+            var tx = session.beginTransaction();
+            session.createMutationQuery("DELETE FROM " + Product.class.getName() + " WHERE id = :id")
+                .setParameter("id", ghost.getId())
+                .executeUpdate();
+            tx.commit();
+        }
+
+        ghost.setPrice(10.0);
+        kept.setPrice(20.0);
+        repository.save(ghost);
+        repository.delete(new Product("Unsaved", "Cat", 1.0, 1, true));
+        repository.save(kept);
+        repository.flushUpdates();
+
+        kept.setPrice(30.0);
+        repository.save(kept);
+        repository.flushUpdates();
+
+        try (var session = sh.fyz.architect.persistent.SessionManager.get().getSession()) {
+            assertNull(session.find(Product.class, ghost.getId()));
+            assertEquals(30.0, session.find(Product.class, kept.getId()).getPrice());
+            assertEquals(1L, session.createSelectionQuery(
+                "SELECT count(p) FROM " + Product.class.getName() + " p", Long.class).getSingleResult());
+        }
     }
 }

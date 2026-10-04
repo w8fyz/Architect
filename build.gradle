@@ -1,20 +1,14 @@
 plugins {
     id 'java-library'
-    id "com.vanniktech.maven.publish" version "0.36.0"
+    id "com.vanniktech.maven.publish" version "0.37.0"
 }
 
 group = 'sh.fyz'
-version = '2.2.5'
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
-}
+version = '3.0.0'
 
 tasks.withType(JavaCompile).configureEach {
+    // Any JDK 21+ can build; the bytecode and the JDK API used stay at Java 21.
+    options.release = 21
     options.encoding = 'UTF-8'
     options.compilerArgs += ['-parameters']
 }
@@ -44,19 +38,27 @@ configurations {
 }
 
 dependencies {
-    api "org.hibernate.orm:hibernate-core:6.6.23.Final"
+    api "org.hibernate.orm:hibernate-core:7.4.11.Final"
     api "jakarta.persistence:jakarta.persistence-api:3.2.0"
 
-    implementation "com.zaxxer:HikariCP:7.0.2"
-    implementation 'redis.clients:jedis:7.4.1'
+    // Without this module Hibernate cannot find its Hikari ConnectionProvider: it ignores every
+    // hibernate.hikari.* setting and silently falls back to its built-in, non-production pool.
+    implementation "org.hibernate.orm:hibernate-hikaricp:7.4.11.Final"
+    implementation "com.zaxxer:HikariCP:7.1.0"
+    // api: RedisManager's public getRedisClient() and getObjectMapper() return their types.
+    api 'redis.clients:jedis:8.0.1'
     implementation 'org.apache.commons:commons-pool2:2.13.1'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.2'
-    implementation 'io.github.classgraph:classgraph:4.8.184'
+    api 'com.fasterxml.jackson.core:jackson-databind:2.22.3'
+    // java.time fields (LocalDateTime, Instant...) cannot be cached in Redis without it.
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.3'
+    implementation 'io.github.classgraph:classgraph:4.8.196'
 
-    examplesRuntimeOnly 'org.postgresql:postgresql:42.7.10'
+    examplesRuntimeOnly 'org.postgresql:postgresql:42.7.13'
 
-    testImplementation 'org.postgresql:postgresql:42.7.10'
-    testImplementation 'org.junit.jupiter:junit-jupiter:5.14.2'
+    testImplementation 'org.postgresql:postgresql:42.7.13'
+    // In-memory, for the H2-specific schema handling (SqlDialect).
+    testImplementation 'com.h2database:h2:2.3.232'
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.1.3'
     testImplementation 'org.awaitility:awaitility:4.3.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

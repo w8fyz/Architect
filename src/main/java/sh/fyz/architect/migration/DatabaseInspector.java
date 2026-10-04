@@ -38,21 +38,17 @@ public class DatabaseInspector {
                 Set<String> primaryKeys = getPrimaryKeys(connection, tableName);
 
                 DatabaseMetaData meta = connection.getMetaData();
-                try (ResultSet rs = meta.getColumns(null, getSchemaPattern(), tableName, null)) {
-                    while (rs.next()) {
-                        columns.add(new ColumnInfo(
-                                rs.getString("COLUMN_NAME"),
-                                rs.getString("TYPE_NAME"),
-                                rs.getInt("COLUMN_SIZE"),
-                                "YES".equals(rs.getString("IS_NULLABLE")),
-                                primaryKeys.contains(rs.getString("COLUMN_NAME")),
-                                rs.getString("COLUMN_DEF")
-                        ));
-                    }
-                }
+                SqlDialect.forEachColumn(connection, dialect, tableName, rs -> columns.add(new ColumnInfo(
+                        rs.getString("COLUMN_NAME"),
+                        rs.getString("TYPE_NAME"),
+                        rs.getInt("COLUMN_SIZE"),
+                        "YES".equals(rs.getString("IS_NULLABLE")),
+                        primaryKeys.contains(rs.getString("COLUMN_NAME")),
+                        rs.getString("COLUMN_DEF")
+                )));
 
                 List<ForeignKeyInfo> foreignKeys = new ArrayList<>();
-                try (ResultSet rs = meta.getImportedKeys(null, getSchemaPattern(), tableName)) {
+                try (ResultSet rs = meta.getImportedKeys(connection.getCatalog(), SqlDialect.schema(connection, dialect), tableName)) {
                     while (rs.next()) {
                         foreignKeys.add(new ForeignKeyInfo(
                                 rs.getString("FKCOLUMN_NAME"),
@@ -80,16 +76,11 @@ public class DatabaseInspector {
 
                 long totalRows = countRows(connection, tableName);
                 List<String> columnNames = new ArrayList<>();
-                DatabaseMetaData meta = connection.getMetaData();
-                try (ResultSet rs = meta.getColumns(null, getSchemaPattern(), tableName, null)) {
-                    while (rs.next()) {
-                        columnNames.add(rs.getString("COLUMN_NAME"));
-                    }
-                }
+                SqlDialect.forEachColumn(connection, dialect, tableName, rs -> columnNames.add(rs.getString("COLUMN_NAME")));
 
                 List<List<String>> rows = new ArrayList<>();
                 int offset = safePage * safeSize;
-                String sql = "SELECT * FROM \"" + tableName + "\" LIMIT " + safeSize + " OFFSET " + offset;
+                String sql = "SELECT * FROM " + SqlDialect.quote(dialect, tableName) + " LIMIT " + safeSize + " OFFSET " + offset;
                 try (Statement stmt = connection.createStatement();
                      ResultSet rs = stmt.executeQuery(sql)) {
                     int colCount = rs.getMetaData().getColumnCount();
@@ -118,27 +109,19 @@ public class DatabaseInspector {
 
     private Set<String> getValidTableNames(Connection connection) throws SQLException {
         Set<String> tables = new TreeSet<>();
-        DatabaseMetaData meta = connection.getMetaData();
-        try (ResultSet rs = meta.getTables(null, getSchemaPattern(), null, new String[]{"TABLE"})) {
-            while (rs.next()) {
-                tables.add(rs.getString("TABLE_NAME"));
-            }
-        }
+        tables.addAll(SqlDialect.tableNames(connection, dialect));
         return tables;
     }
 
     private int countColumns(Connection connection, String tableName) throws SQLException {
-        DatabaseMetaData meta = connection.getMetaData();
-        int count = 0;
-        try (ResultSet rs = meta.getColumns(null, getSchemaPattern(), tableName, null)) {
-            while (rs.next()) count++;
-        }
-        return count;
+        int[] count = {0};
+        SqlDialect.forEachColumn(connection, dialect, tableName, rs -> count[0]++);
+        return count[0];
     }
 
     private long countRows(Connection connection, String tableName) throws SQLException {
         try (Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM \"" + tableName + "\"")) {
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + SqlDialect.quote(dialect, tableName))) {
             return rs.next() ? rs.getLong(1) : 0;
         }
     }
@@ -146,19 +129,12 @@ public class DatabaseInspector {
     private Set<String> getPrimaryKeys(Connection connection, String tableName) throws SQLException {
         Set<String> pks = new HashSet<>();
         DatabaseMetaData meta = connection.getMetaData();
-        try (ResultSet rs = meta.getPrimaryKeys(null, getSchemaPattern(), tableName)) {
+        try (ResultSet rs = meta.getPrimaryKeys(connection.getCatalog(), SqlDialect.schema(connection, dialect), tableName)) {
             while (rs.next()) {
                 pks.add(rs.getString("COLUMN_NAME"));
             }
         }
         return pks;
-    }
-
-    private String getSchemaPattern() {
-        if (dialect.toLowerCase().contains("postgresql")) {
-            return "public";
-        }
-        return null;
     }
 
     public record TableInfo(String name, int columnCount, long rowCount) {}

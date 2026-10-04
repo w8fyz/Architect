@@ -25,6 +25,8 @@ public class EnumCheckConstraintSynchronizer {
     private static final Pattern QUOTED_VALUE = Pattern.compile("'([^']*)'");
     private static final Pattern BETWEEN_RANGE = Pattern.compile(
             "BETWEEN\\s+(\\d+)\\s+AND\\s+(\\d+)", Pattern.CASE_INSENSITIVE);
+    // PostgreSQL stores "col BETWEEN 0 AND 2" as "((col >= 0) AND (col <= 2))".
+    private static final Pattern UPPER_BOUND = Pattern.compile("<=\\s*(\\d+)");
 
     private EnumCheckConstraintSynchronizer() {}
 
@@ -73,7 +75,9 @@ public class EnumCheckConstraintSynchronizer {
 
     @SuppressWarnings("unchecked")
     private static void collectFieldMappings(List<EnumColumnMapping> mappings, Field field, String entityTableName) {
-        if (field.isAnnotationPresent(Transient.class) || Modifier.isTransient(field.getModifiers())) {
+        // Static fields (constants such as a default enum value) are not columns.
+        if (field.isAnnotationPresent(Transient.class) || Modifier.isTransient(field.getModifiers())
+                || Modifier.isStatic(field.getModifiers())) {
             return;
         }
 
@@ -146,10 +150,9 @@ public class EnumCheckConstraintSynchronizer {
 
     private static void syncOrdinalEnum(Connection conn, EnumColumnMapping mapping,
                                          String constraintName, String existingDef) throws SQLException {
-        Matcher m = BETWEEN_RANGE.matcher(existingDef);
-        if (!m.find()) return;
+        Integer existingMax = parseOrdinalMax(existingDef);
+        if (existingMax == null) return;
 
-        int existingMax = Integer.parseInt(m.group(2));
         int currentMax = mapping.enumClass().getEnumConstants().length - 1;
         if (existingMax == currentMax) return;
 
@@ -161,10 +164,20 @@ public class EnumCheckConstraintSynchronizer {
                                            String constraintName, String checkExpr) throws SQLException {
         LOG.info("Synchronizing CHECK constraint \"" + constraintName + "\" on \"" + tableName + "\"");
         try (Statement stmt = conn.createStatement()) {
-            stmt.execute("ALTER TABLE \"" + tableName + "\" DROP CONSTRAINT IF EXISTS \"" + constraintName + "\"");
-            stmt.execute("ALTER TABLE \"" + tableName + "\" ADD CONSTRAINT \"" + constraintName
-                    + "\" CHECK (" + checkExpr + ")");
+            stmt.execute(replaceConstraintStatement(tableName, constraintName, checkExpr));
         }
+    }
+
+    /**
+     * Drops and re-adds a CHECK constraint in one {@code ALTER TABLE}, which PostgreSQL applies
+     * atomically: if existing rows violate the new CHECK, the ADD fails and the old constraint
+     * stays. As two autocommitted statements the DROP would commit on its own and leave the
+     * column unconstrained for good. The DROP also makes the statement safe to replay, including
+     * right after a {@code CREATE TABLE} that already declared the constraint inline.
+     */
+    private static String replaceConstraintStatement(String tableName, String constraintName, String checkExpr) {
+        return "ALTER TABLE \"" + tableName + "\" DROP CONSTRAINT IF EXISTS \"" + constraintName
+                + "\", ADD CONSTRAINT \"" + constraintName + "\" CHECK (" + checkExpr + ")";
     }
 
     private static String queryConstraintDefinition(Connection conn, String tableName,
@@ -212,6 +225,11 @@ public class EnumCheckConstraintSynchronizer {
     /**
      * Generates ALTER TABLE ... ADD CONSTRAINT DDL statements for all enum columns
      * found in the given entity classes. Only produces output for PostgreSQL dialects.
+     *
+     * <p>Each statement drops the constraint first (see {@link #replaceConstraintStatement}):
+     * Hibernate's {@code CREATE TABLE} already declares an inline CHECK that PostgreSQL names
+     * {@code <table>_<column>_check}, so a bare ADD would fail with "already exists" when
+     * replayed right after it (snapshots, baselines, shadow rebuilds).</p>
      */
     public static List<String> generateEnumConstraintsDDL(Collection<Class<?>> entityClasses, String dialect) {
         List<String> statements = new ArrayList<>();
@@ -222,20 +240,8 @@ public class EnumCheckConstraintSynchronizer {
         List<EnumColumnMapping> mappings = collectEnumMappings(entityClasses);
         for (EnumColumnMapping mapping : mappings) {
             String constraintName = mapping.tableName() + "_" + mapping.columnName() + "_check";
-            String checkExpr;
-            if (mapping.enumType() == EnumType.STRING) {
-                String values = Arrays.stream(mapping.enumClass().getEnumConstants())
-                        .map(Enum::name)
-                        .sorted()
-                        .map(v -> "'" + v.replace("'", "''") + "'::character varying")
-                        .collect(Collectors.joining(", "));
-                checkExpr = "(\"" + mapping.columnName() + "\")::text = ANY (ARRAY[" + values + "]::text[])";
-            } else {
-                int max = mapping.enumClass().getEnumConstants().length - 1;
-                checkExpr = "\"" + mapping.columnName() + "\" BETWEEN 0 AND " + max;
-            }
-            statements.add("ALTER TABLE \"" + mapping.tableName() + "\" ADD CONSTRAINT \""
-                    + constraintName + "\" CHECK (" + checkExpr + ")");
+            statements.add(replaceConstraintStatement(mapping.tableName(), constraintName,
+                    currentCheckExpression(mapping)));
         }
         return statements;
     }
@@ -251,7 +257,7 @@ public class EnumCheckConstraintSynchronizer {
      * this, adding a constant to a stored enum passes every local check and then fails every
      * production INSERT carrying the new value.</p>
      *
-     * <p>Emits a {@code DROP CONSTRAINT IF EXISTS} before each {@code ADD}, so applying the result
+     * <p>Each statement drops the constraint before adding it back, so applying the result
      * twice is harmless. Comparison semantics match {@link #syncStringEnum} and
      * {@link #syncOrdinalEnum}: the permitted value set for a STRING enum, the upper bound for an
      * ORDINAL one.</p>
@@ -281,10 +287,8 @@ public class EnumCheckConstraintSynchronizer {
                     continue;
                 }
 
-                statements.add("ALTER TABLE \"" + mapping.tableName()
-                        + "\" DROP CONSTRAINT IF EXISTS \"" + constraintName + "\"");
-                statements.add("ALTER TABLE \"" + mapping.tableName() + "\" ADD CONSTRAINT \""
-                        + constraintName + "\" CHECK (" + currentCheckExpression(mapping) + ")");
+                statements.add(replaceConstraintStatement(mapping.tableName(), constraintName,
+                        currentCheckExpression(mapping)));
             } catch (SQLException e) {
                 LOG.warning("Failed to compare CHECK constraint \"" + constraintName + "\": " + e.getMessage());
             }
@@ -305,11 +309,18 @@ public class EnumCheckConstraintSynchronizer {
                     .collect(Collectors.toCollection(TreeSet::new));
             return existing.equals(current);
         }
-        Matcher m = BETWEEN_RANGE.matcher(existingDef);
-        if (!m.find()) {
-            return false;
+        Integer existingMax = parseOrdinalMax(existingDef);
+        return existingMax != null && existingMax == mapping.enumClass().getEnumConstants().length - 1;
+    }
+
+    /** The upper bound of an ORDINAL enum's range constraint, or null if the definition has none. */
+    private static Integer parseOrdinalMax(String constraintDef) {
+        Matcher between = BETWEEN_RANGE.matcher(constraintDef);
+        if (between.find()) {
+            return Integer.parseInt(between.group(2));
         }
-        return Integer.parseInt(m.group(2)) == mapping.enumClass().getEnumConstants().length - 1;
+        Matcher upper = UPPER_BOUND.matcher(constraintDef);
+        return upper.find() ? Integer.parseInt(upper.group(1)) : null;
     }
 
     /** The CHECK body describing the enum as it stands in Java. */

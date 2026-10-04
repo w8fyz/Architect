@@ -37,7 +37,7 @@ public class GenericRepositoryTest {
             .setReceiver(true)
             .setDatabaseCredentials(new DatabaseCredentials(
                 new PostgreSQLAuth(host, port, db),
-                user, pass, 4, 4, "create-drop"
+                user, pass, 4, "create-drop"
             ));
         architect.addEntityClass(Product.class);
         architect.start();
@@ -138,6 +138,8 @@ public class GenericRepositoryTest {
 
         repository.delete(saved);
         assertNull(repository.findById(id));
+        // The row is already gone (deleted elsewhere, or a relayed delete received twice).
+        assertDoesNotThrow(() -> repository.delete(saved));
     }
 
     @Test
@@ -650,6 +652,35 @@ public class GenericRepositoryTest {
 
         assertEquals(1, result.size());
         assertEquals("Active", result.get(0).getName());
+    }
+
+    @Test
+    @Order(114)
+    @DisplayName("query().whereRaw() - Un parametre nomme p0 n'entre pas en conflit avec le builder")
+    void testQueryWhereRawParameterNamesDoNotCollide() {
+        repository.save(new Product("Wanted", "Books", 10.0, 1, true));
+        repository.save(new Product("Other", "Books", 10.0, 1, true));
+
+        List<Product> result = repository.query()
+            .where("category", "Books")
+            .whereRaw("name = :p0", Map.of("p0", "Wanted"))
+            .findAll();
+
+        assertEquals(1, result.size());
+        assertEquals("Wanted", result.get(0).getName());
+    }
+
+    @Test
+    @Order(115)
+    @DisplayName("query().whereRaw().delete() - Une condition brute suffit")
+    void testQueryDeleteWithRawConditionOnly() {
+        repository.save(new Product("Cheap", "Cat", 5.0, 1, true));
+        repository.save(new Product("Expensive", "Cat", 500.0, 1, true));
+
+        int deleted = repository.query().whereRaw("price > :min", Map.of("min", 100.0)).delete();
+
+        assertEquals(1, deleted);
+        assertEquals(1, repository.query().count());
     }
 
     @Test

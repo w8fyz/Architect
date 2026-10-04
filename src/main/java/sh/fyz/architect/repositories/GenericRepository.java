@@ -1,5 +1,8 @@
 package sh.fyz.architect.repositories;
 
+import jakarta.persistence.Id;
+import jakarta.persistence.Version;
+import sh.fyz.architect.cache.RedisManager;
 import sh.fyz.architect.persistent.SessionManager;
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -7,18 +10,29 @@ import org.hibernate.query.Query;
 
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 public class GenericRepository<T> {
     protected final Class<T> type;
 
     private static final ConcurrentHashMap<Class<?>, Set<String>> VALID_FIELDS_CACHE = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Class<?>, Field> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+    // Names of the builder's own parameters. Unusual on purpose: a whereRaw() parameter with the
+    // same name would silently overwrite the builder's value (or be overwritten by it).
+    private static final String PARAM_PREFIX = "__architect_p";
+    // Optional because ConcurrentHashMap cannot hold null, and "no id field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> ID_FIELD_CACHE = new ConcurrentHashMap<>();
+    // Optional because ConcurrentHashMap cannot hold null, and "no @Version field" must be cached too.
+    private static final ConcurrentHashMap<Class<?>, Optional<Field>> VERSION_FIELD_CACHE = new ConcurrentHashMap<>();
+    // For async calls on an instance with neither a database nor Redis, which then fail, but
+    // through their error callback. Virtual threads need no shutdown.
+    private static final ExecutorService FALLBACK_THREAD_POOL = Executors.newVirtualThreadPerTaskExecutor();
 
     public GenericRepository(Class<T> type) {
         this.type = type;
@@ -32,9 +46,14 @@ public class GenericRepository<T> {
      * Resolves the current session thread pool on each call. This avoids keeping a
      * stale reference after {@code architect.stop()} / {@code start()}, which used to
      * throw {@link java.util.concurrent.RejectedExecutionException} on async operations.
+     * Without a database there is no session thread pool: Redis' executor is used instead
+     * (a relay-only non-receiver), which {@code stop()} also waits for.
      */
     protected ExecutorService threadPool() {
-        return SessionManager.get().getThreadPool();
+        if (SessionManager.isInitialized()) {
+            return SessionManager.get().getThreadPool();
+        }
+        return RedisManager.isInitialized() ? RedisManager.get().getAsyncExecutor() : FALLBACK_THREAD_POOL;
     }
 
     // --- QUERY BUILDER ENTRY POINT ---
@@ -72,14 +91,25 @@ public class GenericRepository<T> {
 
     // --- ID PREPARATION ---
 
+    /**
+     * The {@code @Id} field, searched up the hierarchy so an id inherited from a
+     * {@code @MappedSuperclass} is found; falls back to a field named {@code id}.
+     */
     private Field getIdField(Class<?> clazz) {
         return ID_FIELD_CACHE.computeIfAbsent(clazz, c -> {
-            try {
-                return c.getDeclaredField("id");
-            } catch (NoSuchFieldException e) {
-                return null;
+            Field named = null;
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field f : current.getDeclaredFields()) {
+                    if (f.isAnnotationPresent(Id.class)) {
+                        return Optional.of(f);
+                    }
+                    if (named == null && f.getName().equals("id")) {
+                        named = f;
+                    }
+                }
             }
-        });
+            return Optional.ofNullable(named);
+        }).orElse(null);
     }
 
     public Object prepareEntityId(String value) {
@@ -111,6 +141,7 @@ public class GenericRepository<T> {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
+                beforeMerge(session, entity);
                 @SuppressWarnings("unchecked")
                 T savedEntity = (T) session.merge(entity);
                 transaction.commit();
@@ -136,8 +167,12 @@ public class GenericRepository<T> {
     }
 
     public T findById(Object id) {
-        try (Session session = SessionManager.get().getSession()) {
-            return session.get(type, id);
+        try (Session session = openReadOnlySession()) {
+            T entity = session.find(type, id);
+            if (entity != null) {
+                prepareDetached(session, entity);
+            }
+            return entity;
         }
     }
 
@@ -153,8 +188,10 @@ public class GenericRepository<T> {
     }
 
     public List<T> all() {
-        try (Session session = SessionManager.get().getSession()) {
-            return session.createQuery("from " + type.getName(), type).list();
+        try (Session session = openReadOnlySession()) {
+            List<T> entities = session.createQuery("from " + type.getName(), type).list();
+            entities.forEach(entity -> prepareDetached(session, entity));
+            return entities;
         }
     }
 
@@ -169,12 +206,24 @@ public class GenericRepository<T> {
         });
     }
 
+    /**
+     * Deletes the entity's row. An entity whose row no longer exists (deleted by another
+     * instance, or relayed twice), or that was never saved, has nothing to delete: that is not
+     * an error.
+     */
     public void delete(T entity) {
         try (Session session = SessionManager.get().getSession()) {
             Transaction transaction = session.beginTransaction();
             try {
-                Object managed = session.merge(entity);
-                session.remove(managed);
+                // Looked up first: merging a detached entity whose row is gone throws an
+                // optimistic-lock exception, and merging one never saved would insert it.
+                Object id = session.getSessionFactory().getPersistenceUnitUtil().getIdentifier(entity);
+                if (id != null && session.find(type, id) != null) {
+                    beforeMerge(session, entity);
+                    // Merged onto the instance just loaded, which still checks a @Version.
+                    Object managed = session.merge(entity);
+                    session.remove(managed);
+                }
                 transaction.commit();
             } catch (Exception e) {
                 if (transaction.isActive()) {
@@ -208,27 +257,40 @@ public class GenericRepository<T> {
      * for concurrent callers).
      */
     protected List<T> executeQueryWithLimit(QueryBuilder<T> builder, int explicitLimit) {
-        validateQueryFields(builder);
+        return select(builder, explicitLimit, builder.getOffset(), true);
+    }
 
-        try (Session session = SessionManager.get().getSession()) {
+    /**
+     * Every row matching the builder's conditions, limit and offset ignored — the rows its
+     * {@link QueryBuilder#delete()} removes. Only their ids are used, so they skip
+     * {@link #prepareDetached}.
+     */
+    protected List<T> findAllMatching(QueryBuilder<T> builder) {
+        return select(builder, -1, 0, false);
+    }
+
+    private List<T> select(QueryBuilder<T> builder, int limit, int offset, boolean prepare) {
+        try (Session session = openReadOnlySession()) {
             String hql = buildSelectHql(builder);
             Query<T> query = session.createQuery(hql, type);
             bindParameters(query, builder);
 
-            if (explicitLimit > 0) {
-                query.setMaxResults(explicitLimit);
+            if (limit > 0) {
+                query.setMaxResults(limit);
             }
-            if (builder.getOffset() > 0) {
-                query.setFirstResult(builder.getOffset());
+            if (offset > 0) {
+                query.setFirstResult(offset);
             }
 
-            return query.list();
+            List<T> entities = query.list();
+            if (prepare) {
+                entities.forEach(entity -> prepareDetached(session, entity));
+            }
+            return entities;
         }
     }
 
     protected long executeCount(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
-
         try (Session session = SessionManager.get().getSession()) {
             String hql = buildCountHql(builder);
             Query<Long> query = session.createQuery(hql, Long.class);
@@ -239,10 +301,8 @@ public class GenericRepository<T> {
     }
 
     protected int executeDelete(QueryBuilder<T> builder) {
-        validateQueryFields(builder);
-
-        if (builder.getConditions().isEmpty()) {
-            throw new IllegalStateException("Cannot execute delete without conditions. Use deleteAll() or add at least one where clause.");
+        if (builder.getConditions().isEmpty() && builder.getRawConditions().isEmpty()) {
+            throw new IllegalStateException("Cannot execute delete without conditions. Add at least one where clause.");
         }
 
         try (Session session = SessionManager.get().getSession()) {
@@ -263,6 +323,61 @@ public class GenericRepository<T> {
         }
     }
 
+    /** Called by {@link #save} and {@link #delete} inside their transaction, just before the entity is merged. */
+    protected void beforeMerge(Session session, T entity) {
+    }
+
+    /**
+     * Gives a {@code @Version} entity the version its row currently has, so that merging it
+     * overwrites the row (last writer wins) instead of failing the version check. For copies
+     * that keep the version they were read with while the row's moves on, like the ones served
+     * from Redis. A deleted row is left alone, so its merge still fails.
+     */
+    protected void alignVersion(Session session, T entity, Object id) {
+        Field versionField = VERSION_FIELD_CACHE.computeIfAbsent(entity.getClass(), c -> {
+            for (Class<?> current = c; current != null && current != Object.class; current = current.getSuperclass()) {
+                for (Field f : current.getDeclaredFields()) {
+                    if (f.isAnnotationPresent(Version.class)) {
+                        f.setAccessible(true);
+                        return Optional.of(f);
+                    }
+                }
+            }
+            return Optional.empty();
+        }).orElse(null);
+        if (versionField == null || id == null) {
+            return;
+        }
+        T current = session.find(type, id);
+        if (current == null) {
+            return;
+        }
+        try {
+            versionField.set(entity, versionField.get(current));
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot access @Version field of " + type.getSimpleName(), e);
+        }
+    }
+
+    /**
+     * Called for each entity a read returns, while its session is still open. Subclasses that
+     * need more of the entity graph than the mapping fetches eagerly load it here: once the
+     * session closes, touching an uninitialized lazy association throws.
+     */
+    protected void prepareDetached(Session session, T entity) {
+    }
+
+    /**
+     * A session for queries whose results are returned detached. Read-only entities skip the
+     * copy of their loaded state Hibernate otherwise keeps for dirty checking — pure overhead
+     * here, since the session closes before the caller could modify anything.
+     */
+    private Session openReadOnlySession() {
+        Session session = SessionManager.get().getSession();
+        session.setDefaultReadOnly(true);
+        return session;
+    }
+
     // --- HQL BUILDING ---
 
     private String buildWhereClause(QueryBuilder<T> builder) {
@@ -277,7 +392,7 @@ public class GenericRepository<T> {
         for (int i = 0; i < conditions.size(); i++) {
             if (clauseIndex > 0) where.append(" AND ");
             QueryBuilder.Condition c = conditions.get(i);
-            String param = "p" + i;
+            String param = PARAM_PREFIX + i;
             where.append(switch (c.operator()) {
                 case EQ -> c.field() + " = :" + param;
                 case NEQ -> c.field() + " <> :" + param;
@@ -331,7 +446,7 @@ public class GenericRepository<T> {
         for (int i = 0; i < conditions.size(); i++) {
             QueryBuilder.Condition c = conditions.get(i);
             if (c.operator() != QueryBuilder.Operator.IS_NULL && c.operator() != QueryBuilder.Operator.IS_NOT_NULL) {
-                query.setParameter("p" + i, c.value());
+                query.setParameter(PARAM_PREFIX + i, c.value());
             }
         }
 
@@ -339,15 +454,6 @@ public class GenericRepository<T> {
             for (var entry : raw.parameters().entrySet()) {
                 query.setParameter(entry.getKey(), entry.getValue());
             }
-        }
-    }
-
-    private void validateQueryFields(QueryBuilder<T> builder) {
-        for (QueryBuilder.Condition c : builder.getConditions()) {
-            validateFieldName(c.field());
-        }
-        for (QueryBuilder.OrderBy o : builder.getOrderBys()) {
-            validateFieldName(o.field());
         }
     }
 }
